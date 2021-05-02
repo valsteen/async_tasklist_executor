@@ -143,6 +143,12 @@ fn main() -> Result<(), String> {
             }
         }
 
+        if queue.is_empty() {
+            // this check is only done after getting a result. need this one to exit when the file
+            // is empty, or it'll wait for a result that never comees.
+            task_sender.close();
+        }
+
         ctrlc::set_handler(move || {
             shutdown_sender.close();
         }).expect("Error setting Ctrl-C handler");
