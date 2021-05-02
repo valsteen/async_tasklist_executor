@@ -55,7 +55,7 @@ fn main() -> Result<(), String> {
         let input_file = task::block_on(File::open(input_filename)).map_err(|e| {
             format!("Cannot open file {} for reading: {}", input_filename, e)
         })?;
-        csv_async::AsyncReaderBuilder::new().has_headers(false).create_reader(input_file)
+        csv_async::AsyncReaderBuilder::new().has_headers(false).flexible(true).create_reader(input_file)
     };
 
     let mut csv_writer = {
