@@ -93,6 +93,7 @@ fn main() -> Result<(), String> {
         csv_async::AsyncReaderBuilder::new()
             .has_headers(false)
             .flexible(true)
+            .delimiter(b';')
             .create_reader(input_file)
     };
 
@@ -107,6 +108,7 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("Cannot open file {} for writing: {}", output_filename, e))?;
         csv_async::AsyncWriterBuilder::new()
             .has_headers(false)
+            .delimiter(b';')
             .create_writer(output_file)
     };
 
