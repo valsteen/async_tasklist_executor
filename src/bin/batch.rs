@@ -1,24 +1,37 @@
-use async_std::task;
 use async_std::channel::unbounded;
-use std::time::Duration;
-use log::{info, error, LevelFilter};
-use clap::{App, Arg};
 use async_std::fs::{File, OpenOptions};
-use std::collections::{HashSet, HashMap};
-use futures::{select, FutureExt};
-use futures::stream::StreamExt;
+use async_std::task;
 use chrono::{DateTime, Local};
+use clap::{App, Arg};
+use futures::stream::StreamExt;
+use futures::{select, FutureExt};
+use log::{error, info, LevelFilter};
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 enum Void {}
 
-async fn process(worker: usize, line: usize, url: String) -> Result<DateTime<Local>, String> {
-    let client = reqwest::blocking::ClientBuilder::new().connect_timeout(Duration::from_millis(4000)).timeout(Duration::from_millis(5000)).build().expect("Cannot build http client");
+#[derive(Clone, Debug)]
+enum ProcessError {
+    Unrecoverable(String),
+    Retry(String),
+}
+
+async fn process(worker: usize, line: usize, url: String) -> Result<DateTime<Local>, ProcessError> {
+    let client = reqwest::blocking::ClientBuilder::new()
+        .connect_timeout(Duration::from_millis(4000))
+        .timeout(Duration::from_millis(5000))
+        .build()
+        .expect("Cannot build http client");
 
     let request = match client.get(url.clone()).build() {
         Ok(request) => request,
         Err(e) => {
-            error!("[{}], line {} {}: failed to build request {}", worker, line, url, e);
-            return Err(e.to_string());
+            error!(
+                "[{}], line {} {}: failed to build request {}",
+                worker, line, url, e
+            );
+            return Err(ProcessError::Unrecoverable(e.to_string()));
         }
     };
 
@@ -26,13 +39,13 @@ async fn process(worker: usize, line: usize, url: String) -> Result<DateTime<Loc
         Ok(r) => r,
         Err(e) => {
             error!("[{}], line {} {}: error {}", worker, line, url, e);
-            return Err(e.to_string());
+            return Err(ProcessError::Retry(e.to_string()));
         }
     };
 
     if let Err(e) = response.error_for_status() {
         error!("[{}], line {} {}: error {}", worker, line, url, e);
-        return Err(e.to_string());
+        return Err(ProcessError::Retry(e.to_string()));
     }
 
     info!("[{}], line {} {}: success", worker, line, url);
@@ -40,34 +53,66 @@ async fn process(worker: usize, line: usize, url: String) -> Result<DateTime<Loc
 }
 
 fn main() -> Result<(), String> {
-    env_logger::builder().filter_level(LevelFilter::Info).format_timestamp_secs().init();
+    env_logger::builder()
+        .filter_level(LevelFilter::Info)
+        .format_timestamp_secs()
+        .init();
 
     let arg_matches = App::new("Vendor portal user creation")
-        .arg(Arg::with_name("input").takes_value(true).long("input").required(true))
-        .arg(Arg::with_name("output").takes_value(true).long("output").required(true))
-        .arg(Arg::with_name("workers").takes_value(true).long("workers").required(false).default_value("4"))
+        .arg(
+            Arg::with_name("input")
+                .takes_value(true)
+                .long("input")
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("output")
+                .takes_value(true)
+                .long("output")
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("workers")
+                .takes_value(true)
+                .long("workers")
+                .required(false)
+                .default_value("4"),
+        )
         .get_matches();
 
-    let workers: usize = arg_matches.value_of("workers").unwrap().parse().expect("Numerical value expected");
+    let workers: usize = arg_matches
+        .value_of("workers")
+        .unwrap()
+        .parse()
+        .expect("Numerical value expected");
 
     let mut csv_reader = {
         let input_filename = arg_matches.value_of("input").unwrap();
-        let input_file = task::block_on(File::open(input_filename)).map_err(|e| {
-            format!("Cannot open file {} for reading: {}", input_filename, e)
-        })?;
-        csv_async::AsyncReaderBuilder::new().has_headers(false).flexible(true).create_reader(input_file)
+        let input_file = task::block_on(File::open(input_filename))
+            .map_err(|e| format!("Cannot open file {} for reading: {}", input_filename, e))?;
+        csv_async::AsyncReaderBuilder::new()
+            .has_headers(false)
+            .flexible(true)
+            .create_reader(input_file)
     };
 
     let mut csv_writer = {
         let output_filename = arg_matches.value_of("output").unwrap();
-        let output_file = task::block_on(OpenOptions::new().write(true).create_new(true).open(output_filename)).map_err(|e| {
-            format!("Cannot open file {} for writing: {}", output_filename, e)
-        })?;
-        csv_async::AsyncWriterBuilder::new().has_headers(false).create_writer(output_file)
+        let output_file = task::block_on(
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(output_filename),
+        )
+        .map_err(|e| format!("Cannot open file {} for writing: {}", output_filename, e))?;
+        csv_async::AsyncWriterBuilder::new()
+            .has_headers(false)
+            .create_writer(output_file)
     };
 
     let (task_sender, task_receiver) = unbounded::<(usize, String)>();
-    let (result_sender, result_receiver) = unbounded::<((usize, String), Result<DateTime<Local>, String>)>();
+    let (result_sender, result_receiver) =
+        unbounded::<((usize, String), Result<DateTime<Local>, ProcessError>)>();
     let (shutdown_sender, shutdown_receiver) = unbounded::<Void>();
 
     for n in 0..workers {
@@ -124,12 +169,15 @@ fn main() -> Result<(), String> {
                     info!("line {}: skipping empty line", line_number);
                     continue;
                 }
-                Some(url) => url.to_string()
+                Some(url) => url.to_string(),
             };
             if let Some(ts) = record.get(1) {
                 if !ts.is_empty() {
                     info!("line {}: Skipping {} done at {}", line_number, url, ts);
-                    if let Err(e) = csv_writer.write_record(&[url.clone(), ts.to_string(), "".to_string()]).await {
+                    if let Err(e) = csv_writer
+                        .write_record(&[url.clone(), ts.to_string(), "".to_string()])
+                        .await
+                    {
                         error!("Error while writing back completed {}: {}", url, e);
                         break;
                     }
@@ -151,7 +199,8 @@ fn main() -> Result<(), String> {
 
         ctrlc::set_handler(move || {
             shutdown_sender.close();
-        }).expect("Error setting Ctrl-C handler");
+        })
+        .expect("Error setting Ctrl-C handler");
 
         while let Ok(((line_number, url), result)) = result_receiver.recv().await {
             let record = match result {
@@ -159,22 +208,28 @@ fn main() -> Result<(), String> {
                     info!("Main: {} done at {:?}", url, ts.to_rfc3339());
                     [url.clone(), ts.to_rfc3339(), "".to_string()]
                 }
-                Err(err) => {
-                    let retry = retries.get(&url).cloned().unwrap_or(0);
-                    if retry > 5 {
-                        info!("Main: {} failed: {}", url, err);
-                        [url.clone(), "".to_string(), err]
-                    } else {
-                        retries.insert(url.clone(), retry+1);
-                        info!("Main: {} failed: {}, retry {}", url, err, retry);
-                        if let Err(e) = task_sender.send((line_number, url.to_string())).await {
-                            error!("Cannot send {} for processing {}", url, e);
-                            [url.clone(), "".to_string(), err]
+                Err(err) => match err {
+                    ProcessError::Unrecoverable(msg) => {
+                        info!("Main: {} unrecoverable failure: {}", url, msg);
+                        [url.clone(), "".to_string(), msg]
+                    }
+                    ProcessError::Retry(msg) => {
+                        let retry = retries.get(&url).cloned().unwrap_or(0);
+                        if retry > 5 {
+                            info!("Main: {} failed: {}", url, msg);
+                            [url.clone(), "".to_string(), msg]
                         } else {
-                            continue;
+                            retries.insert(url.clone(), retry + 1);
+                            info!("Main: {} failed: {}, retry {}", url, msg, retry);
+                            if let Err(e) = task_sender.send((line_number, url.to_string())).await {
+                                error!("Cannot send {} for processing {}", url, e);
+                                [url.clone(), "".to_string(), msg]
+                            } else {
+                                continue;
+                            }
                         }
                     }
-                }
+                },
             };
             queue.remove(&url);
             if queue.is_empty() {
@@ -189,7 +244,10 @@ fn main() -> Result<(), String> {
         if !queue.is_empty() {
             info!("writing back {} unprocessed records", queue.len());
             for url in queue {
-                if let Err(e) = csv_writer.write_record(&[url.clone(), "".to_string(), "".to_string()]).await {
+                if let Err(e) = csv_writer
+                    .write_record(&[url.clone(), "".to_string(), "".to_string()])
+                    .await
+                {
                     error!("Error {} while writing {}", e, url)
                 }
             }
