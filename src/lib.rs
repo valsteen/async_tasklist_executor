@@ -174,7 +174,7 @@ pub fn prepare_workers<Fut>(
     task_receiver: Receiver<TaskParameter>,
     result_sender: Sender<CompletedTask>,
     shutdown_receiver: Receiver<Void>,
-    process_entry: &'static (impl Fn(usize, TaskParameter) -> Fut + Send + Sync),
+    process_entry: impl Fn(usize, TaskParameter) -> Fut + Send + Sync + Clone + 'static,
 ) where
     Fut: Future<Output = TaskResult> + Send + Sync,
 {
@@ -182,6 +182,7 @@ pub fn prepare_workers<Fut>(
         let task_receiver = task_receiver.clone();
         let result_sender = result_sender.clone();
         let shutdown_receiver = shutdown_receiver.clone();
+        let process_entry = process_entry.clone();
 
         spawn(async move {
             let mut task_receiver = task_receiver.fuse();

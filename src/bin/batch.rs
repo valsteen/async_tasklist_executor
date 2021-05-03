@@ -75,12 +75,19 @@ fn main() -> Result<(), String> {
     })
     .expect("Error setting Ctrl-C handler");
 
+    // the following would work as process_entry parameter, and would be parallelized,
+    // even though thread::sleep is blocking
+    // let task = |_,_| async {
+    //     thread::sleep(Duration::from_millis(4000));
+    //     Err(ProcessError::Unrecoverable("no".to_string()))
+    // };
+
     async_tasklist_executor::prepare_workers(
         workers,
         task_receiver,
         result_sender,
         shutdown_receiver,
-        &process_entry,
+        process_entry,
     );
     async_tasklist_executor::process_loop(csv_reader, csv_writer, task_sender, result_receiver);
 
