@@ -6,7 +6,7 @@ use log::{error, info};
 
 use crate::{ProcessError, TaskParameter, TaskResult};
 
-pub fn process_entry(worker: usize, task_parameter: TaskParameter) -> TaskResult {
+pub async fn process_entry(worker: usize, task_parameter: TaskParameter) -> TaskResult {
     let client = reqwest::blocking::ClientBuilder::new()
         .connect_timeout(Duration::from_millis(4000))
         .timeout(Duration::from_millis(5000))

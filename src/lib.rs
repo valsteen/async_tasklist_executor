@@ -8,6 +8,7 @@ use csv_async::{AsyncReader, AsyncWriter};
 use futures::StreamExt;
 use futures::{select, FutureExt};
 use log::{error, info};
+use std::future::Future;
 
 pub mod process_entry;
 
@@ -168,13 +169,15 @@ pub fn process_loop(
     });
 }
 
-pub fn prepare_workers(
+pub fn prepare_workers<Fut>(
     workers_count: usize,
     task_receiver: Receiver<TaskParameter>,
     result_sender: Sender<CompletedTask>,
     shutdown_receiver: Receiver<Void>,
-    process_entry: &'static (impl Fn(usize, TaskParameter) -> TaskResult + Send + Sync + 'static),
-) {
+    process_entry: &'static (impl Fn(usize, TaskParameter) -> Fut + Send + Sync),
+) where
+    Fut: Future<Output = TaskResult> + Send + Sync,
+{
     for n in 0..workers_count {
         let task_receiver = task_receiver.clone();
         let result_sender = result_sender.clone();
@@ -188,7 +191,7 @@ pub fn prepare_workers(
                 select! {
                     parameters = task_receiver.next().fuse() => match parameters {
                         Some(task_parameters) => {
-                            let result = process_entry(n, task_parameters.clone());
+                            let result = process_entry(n, task_parameters.clone()).await;
 
                             if let Err(err) = result_sender.send(
                                 CompletedTask {
