@@ -9,9 +9,7 @@ use futures::StreamExt;
 use futures::{select, FutureExt};
 use log::{error, info};
 
-use process_entry::process_entry;
-
-mod process_entry;
+pub mod process_entry;
 
 pub enum Void {}
 
@@ -175,6 +173,7 @@ pub fn prepare_workers(
     task_receiver: Receiver<TaskParameter>,
     result_sender: Sender<CompletedTask>,
     shutdown_receiver: Receiver<Void>,
+    process_entry: &'static (impl Fn(usize, TaskParameter) -> TaskResult + Send + Sync + 'static),
 ) {
     for n in 0..workers_count {
         let task_receiver = task_receiver.clone();
@@ -189,7 +188,7 @@ pub fn prepare_workers(
                 select! {
                     parameters = task_receiver.next().fuse() => match parameters {
                         Some(task_parameters) => {
-                            let result = process_entry(n, task_parameters.clone()).await;
+                            let result = process_entry(n, task_parameters.clone());
 
                             if let Err(err) = result_sender.send(
                                 CompletedTask {

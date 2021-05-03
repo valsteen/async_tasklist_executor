@@ -1,5 +1,5 @@
 [package]
-name = "task_poc"
+name = "async_tasklist_executor"
 version = "0.1.0"
 authors = ["Vincent Alsteen <vincent.alsteen@gmail.com>"]
 edition = "2018"

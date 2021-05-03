@@ -4,7 +4,8 @@ use async_std::task;
 use clap::{App, Arg};
 use log::LevelFilter;
 
-use task_poc::Void;
+use async_tasklist_executor::process_entry::process_entry;
+use async_tasklist_executor::Void;
 
 fn main() -> Result<(), String> {
     env_logger::builder()
@@ -74,8 +75,14 @@ fn main() -> Result<(), String> {
     })
     .expect("Error setting Ctrl-C handler");
 
-    task_poc::prepare_workers(workers, task_receiver, result_sender, shutdown_receiver);
-    task_poc::process_loop(csv_reader, csv_writer, task_sender, result_receiver);
+    async_tasklist_executor::prepare_workers(
+        workers,
+        task_receiver,
+        result_sender,
+        shutdown_receiver,
+        &process_entry,
+    );
+    async_tasklist_executor::process_loop(csv_reader, csv_writer, task_sender, result_receiver);
 
     Ok(())
 }
