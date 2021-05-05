@@ -4,8 +4,8 @@ use async_std::task;
 use clap::{App, Arg};
 use log::LevelFilter;
 
+use async_tasklist_executor::{Void, TaskParameter};
 use async_tasklist_executor::process_entry::process_entry;
-use async_tasklist_executor::Void;
 
 fn main() -> Result<(), String> {
     env_logger::builder()
@@ -75,19 +75,24 @@ fn main() -> Result<(), String> {
     })
     .expect("Error setting Ctrl-C handler");
 
-    // the following would work as process_entry parameter, and would be parallelized,
-    // even though thread::sleep is blocking
-    // let task = |_,_| async {
-    //     thread::sleep(Duration::from_millis(4000));
-    //     Err(ProcessError::Unrecoverable("no".to_string()))
-    // };
+    // this way we can initialize a 'task processor' that can setup some state that can then
+    // be read/change at every iteration
+    let future_factory = |worker_id: String| async move {
+        // demonstrates a modifiable state between calls
+        let mut n_request = 0;
+        move |parameter: TaskParameter| {
+            n_request += 1;
+            process_entry(format!("Worker {} Request {}", worker_id, n_request),
+                          parameter)
+        }
+    };
 
     async_tasklist_executor::prepare_workers(
         workers,
         task_receiver,
         result_sender,
         shutdown_receiver,
-        process_entry,
+        future_factory,
     );
     async_tasklist_executor::process_loop(csv_reader, csv_writer, task_sender, result_receiver);
 

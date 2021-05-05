@@ -20,7 +20,7 @@ pub enum ProcessError {
     Retry(String),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TaskParameter {
     pub line: usize,
     pub url: String,
@@ -169,30 +169,34 @@ pub fn process_loop(
     });
 }
 
-pub fn prepare_workers<Fut>(
+pub fn prepare_workers<FutureFactory, FutureFactoryResult, FutureProcessor, FutureResult>(
     workers_count: usize,
     task_receiver: Receiver<TaskParameter>,
     result_sender: Sender<CompletedTask>,
     shutdown_receiver: Receiver<Void>,
-    process_entry: impl Fn(usize, TaskParameter) -> Fut + Send + Sync + Clone + 'static,
+    process_entry_factory: FutureFactory,
 ) where
-    Fut: Future<Output = TaskResult> + Send + Sync,
+    FutureFactory: Fn(String) -> FutureFactoryResult + Clone + Send + Sync + 'static,
+    FutureFactoryResult: Future<Output=FutureProcessor> + Send,
+    FutureProcessor: FnMut(TaskParameter) -> FutureResult + Send,
+    FutureResult: Future<Output=TaskResult> + Send
 {
     for n in 0..workers_count {
         let task_receiver = task_receiver.clone();
         let result_sender = result_sender.clone();
         let shutdown_receiver = shutdown_receiver.clone();
-        let process_entry = process_entry.clone();
+        let process_entry_factory = process_entry_factory.clone();
 
         spawn(async move {
             let mut task_receiver = task_receiver.fuse();
             let mut shutdown_receiver = shutdown_receiver.fuse();
+            let mut process_entry = process_entry_factory(format!("Worker {}", n)).await;
 
             loop {
                 select! {
                     parameters = task_receiver.next().fuse() => match parameters {
                         Some(task_parameters) => {
-                            let result = process_entry(n, task_parameters.clone()).await;
+                            let result = process_entry(task_parameters.clone()).await;
 
                             if let Err(err) = result_sender.send(
                                 CompletedTask {

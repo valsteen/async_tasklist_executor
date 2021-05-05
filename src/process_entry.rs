@@ -6,7 +6,7 @@ use log::{error, info};
 
 use crate::{ProcessError, TaskParameter, TaskResult};
 
-pub async fn process_entry(worker: usize, task_parameter: TaskParameter) -> TaskResult {
+pub async fn process_entry(worker_id: String, task_parameter: TaskParameter) -> TaskResult {
     let client = reqwest::blocking::ClientBuilder::new()
         .connect_timeout(Duration::from_millis(4000))
         .timeout(Duration::from_millis(5000))
@@ -18,7 +18,7 @@ pub async fn process_entry(worker: usize, task_parameter: TaskParameter) -> Task
         Err(e) => {
             error!(
                 "[{}], line {} {}: failed to build request {}",
-                worker, task_parameter.line, task_parameter.url, e
+                worker_id, task_parameter.line, task_parameter.url, e
             );
             return Err(ProcessError::Unrecoverable(e.to_string()));
         }
@@ -29,7 +29,7 @@ pub async fn process_entry(worker: usize, task_parameter: TaskParameter) -> Task
         Err(e) => {
             error!(
                 "[{}], line {} {}: error {}",
-                worker, task_parameter.line, task_parameter.url, e
+                worker_id, task_parameter.line, task_parameter.url, e
             );
             return Err(ProcessError::Retry(e.to_string()));
         }
@@ -38,14 +38,14 @@ pub async fn process_entry(worker: usize, task_parameter: TaskParameter) -> Task
     if let Err(e) = response.error_for_status() {
         error!(
             "[{}], line {} {}: error {}",
-            worker, task_parameter.line, task_parameter.url, e
+            worker_id, task_parameter.line, task_parameter.url, e
         );
         return Err(ProcessError::Retry(e.to_string()));
     }
 
     info!(
         "[{}], line {} {}: success",
-        worker, task_parameter.line, task_parameter.url
+        worker_id, task_parameter.line, task_parameter.url
     );
     Ok(Local::now())
 }
