@@ -2,13 +2,13 @@ use std::collections::{HashMap, HashSet};
 
 use async_std::channel::{Receiver, Sender};
 use async_std::fs::File;
-use async_std::task::{block_on, spawn};
+use async_std::future::Future;
+use async_std::task;
 use chrono::{DateTime, Local};
 use csv_async::{AsyncReader, AsyncWriter};
+use futures::future::join_all;
 use futures::StreamExt;
-use futures::{select, FutureExt};
 use log::{error, info};
-use std::future::Future;
 
 pub mod process_entry;
 
@@ -28,12 +28,13 @@ pub struct TaskParameter {
 
 pub type TaskResult = Result<DateTime<Local>, ProcessError>;
 
+#[derive(Clone)]
 pub struct CompletedTask {
     pub parameters: TaskParameter,
     pub result: TaskResult,
 }
 
-pub fn process_loop(
+pub async fn process_loop(
     mut csv_reader: AsyncReader<File>,
     mut csv_writer: AsyncWriter<File>,
     task_sender: Sender<TaskParameter>,
@@ -42,7 +43,7 @@ pub fn process_loop(
     let mut queue = HashSet::<String>::new();
     let mut retries = HashMap::<String, usize>::new();
 
-    block_on(async move {
+    async move {
         let mut line_number: usize = 0;
         while let Some(record) = csv_reader.records().next().await {
             line_number += 1;
@@ -128,9 +129,8 @@ pub fn process_loop(
                                 "Main: {} failed: {}, retry {}",
                                 completed_task.parameters.url, msg, retry
                             );
-                            if let Err(e) =
-                                task_sender.send(completed_task.parameters.clone()).await
-                            {
+
+                            if let Err(e) = task_sender.send(completed_task.parameters.clone()).await {
                                 error!(
                                     "Cannot send {} for processing {}",
                                     completed_task.parameters.url, e
@@ -166,10 +166,10 @@ pub fn process_loop(
         } else {
             info!("All records processed")
         }
-    });
+    }.await
 }
 
-pub fn prepare_workers<FutureFactory, FutureFactoryResult, FutureProcessor, FutureResult>(
+pub async fn prepare_workers<FutureFactory, FutureFactoryResult, FutureProcessor, FutureResult>(
     workers_count: usize,
     task_receiver: Receiver<TaskParameter>,
     result_sender: Sender<CompletedTask>,
@@ -181,43 +181,39 @@ pub fn prepare_workers<FutureFactory, FutureFactoryResult, FutureProcessor, Futu
     FutureProcessor: FnMut(TaskParameter) -> FutureResult + Send,
     FutureResult: Future<Output=TaskResult> + Send
 {
+    let mut workers = vec![];
     for n in 0..workers_count {
         let task_receiver = task_receiver.clone();
         let result_sender = result_sender.clone();
         let shutdown_receiver = shutdown_receiver.clone();
         let process_entry_factory = process_entry_factory.clone();
 
-        spawn(async move {
-            let mut task_receiver = task_receiver.fuse();
-            let mut shutdown_receiver = shutdown_receiver.fuse();
+        workers.push(task::spawn(async move {
             let mut process_entry = process_entry_factory(format!("Worker {}", n)).await;
 
-            loop {
-                select! {
-                    parameters = task_receiver.next().fuse() => match parameters {
-                        Some(task_parameters) => {
-                            let result = process_entry(task_parameters.clone()).await;
-
-                            if let Err(err) = result_sender.send(
-                                CompletedTask {
-                                    parameters: task_parameters.clone(),
-                                    result: result.clone()
-                                }
-                            ).await {
-                                error!("{}: unable to send result for {}={:?}, exiting task ({})", n, task_parameters.url, result, err);
-                                break
-                            }
-                        },
-                        None => break
-                    },
-                    void = shutdown_receiver.next().fuse() => match void {
-                        Some(void) => match void {},
-                        None => break,
+            while let Ok(task_parameters) = task_receiver.recv().await {
+                let completed_task = if !shutdown_receiver.is_closed() {
+                    let result = process_entry(task_parameters.clone()).await;
+                    CompletedTask {
+                        parameters: task_parameters.clone(),
+                        result: result.clone(),
                     }
+                } else {
+                    CompletedTask {
+                        parameters: task_parameters.clone(),
+                        result: Err(ProcessError::Unrecoverable("Shutdown".to_string())),
+                    }
+                };
+
+                if let Err(err) = result_sender.send(completed_task.clone()).await {
+                    error!("{}: unable to send result for {}={:?}, exiting task ({})", n, task_parameters.url, completed_task.result, err);
+                    break;
                 }
             }
 
             info!("{}: graceful exit", n);
-        });
+        }));
     }
+
+    join_all(workers).await;
 }

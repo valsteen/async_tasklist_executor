@@ -24,11 +24,13 @@ pub async fn process_entry(worker_id: String, task_parameter: TaskParameter) -> 
         }
     };
 
+    // note that client.execute can return a "channel closed" error message, this is its own
+    // channel, not from this library
     let response = match client.execute(request) {
         Ok(r) => r,
         Err(e) => {
             error!(
-                "[{}], line {} {}: error {}",
+                "[{}], line {} {}: client.execute error {}",
                 worker_id, task_parameter.line, task_parameter.url, e
             );
             return Err(ProcessError::Retry(e.to_string()));
@@ -37,7 +39,7 @@ pub async fn process_entry(worker_id: String, task_parameter: TaskParameter) -> 
 
     if let Err(e) = response.error_for_status() {
         error!(
-            "[{}], line {} {}: error {}",
+            "[{}], line {} {}: status error {}",
             worker_id, task_parameter.line, task_parameter.url, e
         );
         return Err(ProcessError::Retry(e.to_string()));

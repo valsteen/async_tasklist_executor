@@ -1,10 +1,11 @@
-use async_std::channel::unbounded;
+use async_std::channel::{bounded, unbounded};
 use async_std::fs::{File, OpenOptions};
 use async_std::task;
 use clap::{App, Arg};
+use futures::future::join_all;
 use log::LevelFilter;
 
-use async_tasklist_executor::{Void, TaskParameter};
+use async_tasklist_executor::{TaskParameter, Void};
 use async_tasklist_executor::process_entry::process_entry;
 
 struct ProcessState {
@@ -72,7 +73,7 @@ fn main() -> Result<(), String> {
             .create_writer(output_file)
     };
 
-    let (task_sender, task_receiver) = unbounded();
+    let (task_sender, task_receiver) = bounded(workers);
     let (result_sender, result_receiver) = unbounded();
     let (shutdown_sender, shutdown_receiver) = unbounded::<Void>();
     ctrlc::set_handler(move || {
@@ -92,14 +93,17 @@ fn main() -> Result<(), String> {
         }
     };
 
-    async_tasklist_executor::prepare_workers(
-        workers,
-        task_receiver,
-        result_sender,
-        shutdown_receiver,
-        future_factory,
-    );
-    async_tasklist_executor::process_loop(csv_reader, csv_writer, task_sender, result_receiver);
+    task::block_on(async {
+        let workers_handle = task::spawn(async_tasklist_executor::prepare_workers(
+            workers,
+            task_receiver,
+            result_sender,
+            shutdown_receiver,
+            future_factory,
+        ));
+        let csv_handle = task::spawn(async_tasklist_executor::process_loop(csv_reader, csv_writer, task_sender, result_receiver));
+        join_all(vec![workers_handle, csv_handle]).await;
+    });
 
     Ok(())
 }
