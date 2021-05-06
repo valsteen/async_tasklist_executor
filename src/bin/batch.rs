@@ -7,6 +7,11 @@ use log::LevelFilter;
 use async_tasklist_executor::{Void, TaskParameter};
 use async_tasklist_executor::process_entry::process_entry;
 
+struct ProcessState {
+    request_count: usize,
+    worker_name: String
+}
+
 fn main() -> Result<(), String> {
     env_logger::builder()
         .filter_level(LevelFilter::Info)
@@ -79,10 +84,10 @@ fn main() -> Result<(), String> {
     // be read/change at every iteration
     let future_factory = |worker_id: String| async move {
         // demonstrates a modifiable state between calls
-        let mut n_request = 0;
+        let mut state = ProcessState { request_count: 0, worker_name: worker_id };
         move |parameter: TaskParameter| {
-            n_request += 1;
-            process_entry(format!("Worker {} Request {}", worker_id, n_request),
+            state.request_count += 1;
+            process_entry(format!("{} Request {}", state.worker_name, state.request_count),
                           parameter)
         }
     };
