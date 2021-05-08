@@ -1,213 +1,261 @@
-use std::collections::{HashMap, HashSet};
+use std::fmt::{Debug, Display, Formatter};
 
 use async_std::channel::{Receiver, Sender};
 use async_std::fs::File;
 use async_std::future::Future;
 use async_std::task;
-use chrono::{DateTime, Local};
-use csv_async::{AsyncReader, AsyncWriter};
+use chrono::Local;
+use csv_async::{AsyncReader, AsyncWriter, StringRecord};
 use futures::future::join_all;
 use futures::StreamExt;
 use log::{error, info};
 
 pub mod process_entry;
 
-pub enum Void {}
-
 #[derive(Clone, Debug)]
-pub enum ProcessError {
-    Unrecoverable(String),
-    Retry(String),
-}
-
-#[derive(Clone, Debug)]
-pub struct TaskParameter {
+pub struct TaskRow {
     pub line: usize,
     pub url: String,
+    pub success_ts: Option<String>,
+    pub error: Option<String>,
+    pub attempt: usize,
 }
-
-pub type TaskResult = Result<DateTime<Local>, ProcessError>;
 
 #[derive(Clone)]
-pub struct CompletedTask {
-    pub parameters: TaskParameter,
-    pub result: TaskResult,
+pub enum TaskError {
+    ProcessingError(String),
+    Shutdown,
 }
 
-pub async fn process_loop(
-    mut csv_reader: AsyncReader<File>,
+impl Display for TaskError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&match self {
+            TaskError::ProcessingError(msg) => msg.clone(),
+            TaskError::Shutdown => "shutdown before completion".to_string(),
+        }, f)
+    }
+}
+
+
+#[derive(Clone)]
+pub enum TaskResult {
+    Success(TaskRow),
+    Error(TaskRow, TaskError),
+    Retry(TaskRow, String),
+}
+
+
+pub async fn write_loop(
     mut csv_writer: AsyncWriter<File>,
-    task_sender: Sender<TaskParameter>,
-    result_receiver: Receiver<CompletedTask>,
+    result_receiver: Receiver<WriterMsg>,
 ) {
-    let mut queue = HashSet::<String>::new();
-    let mut retries = HashMap::<String, usize>::new();
 
-    async move {
-        let mut line_number: usize = 0;
-        while let Some(record) = csv_reader.records().next().await {
-            line_number += 1;
-            let record = match record {
-                Ok(r) => r,
-                Err(err) => {
-                    error!("line {}: skipping record ({})", line_number, err);
-                    continue;
+    let mut read_count = None;
+    let mut write_count = 0;
+
+    while let Ok(msg) = result_receiver.recv().await {
+        let task_row = match msg {
+            WriterMsg::TaskRow(task_row) => task_row,
+            WriterMsg::Eof(s) => {
+                read_count = Some(s);
+
+                assert!(write_count <= s);
+
+                if write_count >= s {
+                    info!("all records written out, leaving");
+                    return ;
                 }
-            };
-            let url = match record.get(0) {
-                None => {
-                    info!("line {}: skipping empty line", line_number);
-                    continue;
-                }
-                Some(url) => url.to_string(),
-            };
-            if let Some(ts) = record.get(1) {
-                if !ts.is_empty() {
-                    info!("line {}: Skipping {} done at {}", line_number, url, ts);
-                    if let Err(e) = csv_writer
-                        .write_record(&[url.clone(), ts.to_string(), "".to_string()])
-                        .await
-                    {
-                        error!("Error while writing back completed {}: {}", url, e);
-                        break;
-                    }
-                    continue;
-                }
+
+                continue;
             }
-            queue.insert(url.clone());
-            if let Err(e) = task_sender
-                .send(TaskParameter {
-                    line: line_number,
-                    url: url.to_string(),
-                })
-                .await
-            {
-                error!("Cannot send {} for processing, stopping ({})", url, e);
-                break;
+        };
+
+        let record = match task_row.success_ts {
+            None => {
+                StringRecord::from(vec![
+                    task_row.url.clone(),
+                    "".to_string(),
+                    task_row.error.unwrap_or_default()
+                ])
             }
+            Some(ts) => {
+                StringRecord::from(vec![
+                    task_row.url.clone(),
+                    ts
+                ])
+            }
+        };
+
+        if let Err(e) = csv_writer.write_record(&record).await {
+            error!("Error while writing back {:?} ({}), quitting", record, e);
+            return;
         }
 
-        if queue.is_empty() {
-            // this check is only done after getting a result. need this one to exit when the file
-            // is empty, or it'll wait for a result that never comees.
-            task_sender.close();
-        }
+        write_count += 1;
 
-        while let Ok(completed_task) = result_receiver.recv().await {
-            let record = match completed_task.result {
-                Ok(ts) => {
-                    info!(
-                        "Main: {} done at {:?}",
-                        completed_task.parameters.url,
-                        ts.to_rfc3339()
-                    );
-                    [
-                        completed_task.parameters.url.clone(),
-                        ts.to_rfc3339(),
-                        "".to_string(),
-                    ]
-                }
-                Err(err) => match err {
-                    ProcessError::Unrecoverable(msg) => {
-                        info!(
-                            "Main: {} unrecoverable failure: {}",
-                            completed_task.parameters.url, msg
-                        );
-                        [completed_task.parameters.url.clone(), "".to_string(), msg]
-                    }
-                    ProcessError::Retry(msg) => {
-                        let retry = retries
-                            .get(&completed_task.parameters.url)
-                            .cloned()
-                            .unwrap_or(0);
-                        if retry > 5 {
-                            info!("Main: {} failed: {}", completed_task.parameters.url, msg);
-                            [completed_task.parameters.url.clone(), "".to_string(), msg]
-                        } else {
-                            retries.insert(completed_task.parameters.url.clone(), retry + 1);
-                            info!(
-                                "Main: {} failed: {}, retry {}",
-                                completed_task.parameters.url, msg, retry
-                            );
-
-                            if let Err(e) = task_sender.send(completed_task.parameters.clone()).await {
-                                error!(
-                                    "Cannot send {} for processing {}",
-                                    completed_task.parameters.url, e
-                                );
-                                [completed_task.parameters.url.clone(), "".to_string(), msg]
-                            } else {
-                                continue;
-                            }
-                        }
-                    }
-                },
-            };
-            queue.remove(&completed_task.parameters.url);
-            if queue.is_empty() {
-                task_sender.close();
-            }
-
-            if let Err(e) = csv_writer.write_record(&record).await {
-                error!("Error while writing back {} ({})", record.join(";"), e)
+        if let Some(read_count) = read_count {
+            assert!(write_count <= read_count);
+            if write_count >= read_count {
+                info!("all records written out, leaving");
+                return ;
             }
         }
-
-        if !queue.is_empty() {
-            info!("writing back {} unprocessed records", queue.len());
-            for url in queue {
-                if let Err(e) = csv_writer
-                    .write_record(&[url.clone(), "".to_string(), "".to_string()])
-                    .await
-                {
-                    error!("Error {} while writing {}", e, url)
-                }
-            }
-        } else {
-            info!("All records processed")
-        }
-    }.await
+    }
 }
+
+
+pub async fn make_task_row(record: StringRecord, line_number: usize) -> Result<TaskRow, String> {
+    let url = match record.get(0) {
+        None => {
+            info!("line {}: skipping empty line", line_number);
+            return Err("empty line".to_string());
+        }
+        Some(url) => url.to_string(),
+    };
+
+    let success_ts = match record.get(1) {
+        None => None,
+        Some(ts) => {
+            if ts.is_empty() {
+                None
+            } else {
+                Some(ts.to_string())
+            }
+        }
+    };
+
+    Ok(TaskRow {
+        line: line_number,
+        url,
+        success_ts,
+        error: None,
+        attempt: 0,
+    })
+}
+
+pub enum WriterMsg {
+    TaskRow(TaskRow),
+    Eof(usize)
+}
+
+pub async fn csv_read_loop(
+    mut csv_reader: AsyncReader<File>,
+    task_sender: Sender<TaskRow>,
+    result_sender: Sender<WriterMsg>,
+) {
+    let mut line_number: usize = 0;
+    let mut tasks_count: usize = 0;
+
+    while let Some(record_result) = csv_reader.records().next().await {
+        line_number += 1;
+
+        let line_result = match record_result {
+            Ok(record) => {
+                make_task_row(record, line_number).await
+            }
+            Err(err) => {
+                error!("line {}: skipping record ({})", line_number, err);
+                continue;
+            }
+        };
+
+        let mut task_row = match line_result {
+            Ok(task_row) => task_row,
+            Err(_) => {
+                continue;
+            }
+        };
+
+        tasks_count += 1 ;
+
+        if task_row.success_ts.is_some() {
+            if let Err(e) = result_sender.send( WriterMsg::TaskRow(task_row.clone())).await {
+                error!("cannot write back {:?} ({}), quitting", task_row, e);
+                return;
+            }
+            continue;
+        } else if let Err(e) = task_sender.send(task_row.clone()).await {
+            error!("cannot send task, writing back {:?} ( {} )", task_row, e);
+            task_row.error = Some("Shutdown".to_string());
+            if let Err(e) = result_sender.send( WriterMsg::TaskRow(task_row)).await {
+                error!("cannot write back unprocessed ({}), quitting", e);
+                return;
+            };
+        };
+    }
+
+    if let Err(e) = result_sender.send(WriterMsg::Eof(tasks_count)).await {
+        error!("cannot send eof after {} tasks ( {} )", tasks_count, e);
+    }
+}
+
 
 pub async fn prepare_workers<FutureFactory, FutureFactoryResult, FutureProcessor, FutureResult>(
     workers_count: usize,
-    task_receiver: Receiver<TaskParameter>,
-    result_sender: Sender<CompletedTask>,
-    shutdown_receiver: Receiver<Void>,
+    task_receiver: Receiver<TaskRow>,
+    task_sender: Sender<TaskRow>,
+    result_sender: Sender<WriterMsg>,
     process_entry_factory: FutureFactory,
+    retries: usize,
 ) where
     FutureFactory: Fn(String) -> FutureFactoryResult + Clone + Send + Sync + 'static,
     FutureFactoryResult: Future<Output=FutureProcessor> + Send,
-    FutureProcessor: FnMut(TaskParameter) -> FutureResult + Send,
+    FutureProcessor: FnMut(TaskRow) -> FutureResult + Send,
     FutureResult: Future<Output=TaskResult> + Send
 {
     let mut workers = vec![];
     for n in 0..workers_count {
         let task_receiver = task_receiver.clone();
+        let task_sender = task_sender.clone();
         let result_sender = result_sender.clone();
-        let shutdown_receiver = shutdown_receiver.clone();
         let process_entry_factory = process_entry_factory.clone();
 
         workers.push(task::spawn(async move {
             let mut process_entry = process_entry_factory(format!("Worker {}", n)).await;
 
-            while let Ok(task_parameters) = task_receiver.recv().await {
-                let completed_task = if !shutdown_receiver.is_closed() {
-                    let result = process_entry(task_parameters.clone()).await;
-                    CompletedTask {
-                        parameters: task_parameters.clone(),
-                        result: result.clone(),
-                    }
+            while let Ok(task_row) = task_receiver.recv().await {
+                let task_result = if !task_sender.is_closed() {
+                    process_entry(task_row.clone()).await
                 } else {
-                    CompletedTask {
-                        parameters: task_parameters.clone(),
-                        result: Err(ProcessError::Unrecoverable("Shutdown".to_string())),
+                    TaskResult::Error(task_row, TaskError::Shutdown)
+                };
+
+                let error_task_row = match task_result {
+                    TaskResult::Success(mut task_row) => {
+                        task_row.success_ts = Some(Local::now().to_rfc3339());
+                        task_row.error = None;
+                        if let Err(e) = result_sender.send( WriterMsg::TaskRow(task_row.clone())).await {
+                            error!("Could not output successful record {:?} : {}, quitting", task_row, e);
+                            return;
+                        }
+                        continue;
+                    }
+                    TaskResult::Error(mut task_row, task_error) => {
+                        task_row.success_ts = None;
+                        task_row.error = Some(task_error.to_string());
+                        task_row
+                    }
+                    TaskResult::Retry(mut task_row, task_error) => {
+                        task_row.attempt += 1;
+                        if task_row.attempt <= retries {
+                            match task_sender.send(task_row.clone()).await {
+                                Ok(_) => {
+                                    continue;
+                                }
+                                Err(e) => {
+                                    error!("Could not send {:?} for retry ( {} )", task_row, e);
+                                    // let task_row go through the error processing
+                                }
+                            }
+                        }
+                        task_row.error = Some(task_error.to_string());
+                        task_row
                     }
                 };
 
-                if let Err(err) = result_sender.send(completed_task.clone()).await {
-                    error!("{}: unable to send result for {}={:?}, exiting task ({})", n, task_parameters.url, completed_task.result, err);
-                    break;
+                if let Err(e) = result_sender.send(WriterMsg::TaskRow(error_task_row.clone())).await {
+                    error!("Could not output failed record {:?} : {}, quitting", error_task_row, e);
+                    return;
                 }
             }
 
