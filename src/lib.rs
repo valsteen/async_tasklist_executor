@@ -13,9 +13,9 @@ use log::{error, info};
 pub mod process_entry;
 
 #[derive(Clone, Debug)]
-pub struct TaskRow {
+pub struct TaskRow<Data> where Data : Clone {
     pub line: usize,
-    pub url: String,
+    pub data: Data,
     pub success_ts: Option<String>,
     pub error: Option<String>,
     pub attempt: usize,
@@ -38,17 +38,17 @@ impl Display for TaskError {
 
 
 #[derive(Clone)]
-pub enum TaskResult {
-    Success(TaskRow),
-    Error(TaskRow, TaskError),
-    Retry(TaskRow, String),
+pub enum TaskResult<Data: Clone> {
+    Success(TaskRow<Data>),
+    Error(TaskRow<Data>, TaskError),
+    Retry(TaskRow<Data>, String),
 }
 
 
-pub async fn write_loop(
+pub async fn write_loop<Data>(
     mut csv_writer: AsyncWriter<File>,
-    result_receiver: Receiver<WriterMsg>,
-) {
+    result_receiver: Receiver<WriterMsg<Data>>,
+) where Data : Display + Clone {
 
     let mut read_count = None;
     let mut write_count = 0;
@@ -73,14 +73,14 @@ pub async fn write_loop(
         let record = match task_row.success_ts {
             None => {
                 StringRecord::from(vec![
-                    task_row.url.clone(),
+                    task_row.data.to_string(),
                     "".to_string(),
                     task_row.error.unwrap_or_default()
                 ])
             }
             Some(ts) => {
                 StringRecord::from(vec![
-                    task_row.url.clone(),
+                    task_row.data.to_string(),
                     ts
                 ])
             }
@@ -104,7 +104,9 @@ pub async fn write_loop(
 }
 
 
-pub async fn make_task_row(record: StringRecord, line_number: usize) -> Result<TaskRow, String> {
+pub async fn make_task_row<Data: Clone>(record: StringRecord, line_number: usize) -> Result<TaskRow<Data>, String>
+where Data : From<String>
+{
     let url = match record.get(0) {
         None => {
             info!("line {}: skipping empty line", line_number);
@@ -126,22 +128,22 @@ pub async fn make_task_row(record: StringRecord, line_number: usize) -> Result<T
 
     Ok(TaskRow {
         line: line_number,
-        url,
+        data: url.into(),
         success_ts,
         error: None,
         attempt: 0,
     })
 }
 
-pub enum WriterMsg {
-    TaskRow(TaskRow),
+pub enum WriterMsg<Data: Clone> {
+    TaskRow(TaskRow<Data>),
     Eof(usize)
 }
 
-pub async fn csv_read_loop(
+pub async fn csv_read_loop<Data: Clone + From<String> + Debug>(
     mut csv_reader: AsyncReader<File>,
-    task_sender: Sender<TaskRow>,
-    result_sender: Sender<WriterMsg>,
+    task_sender: Sender<TaskRow<Data>>,
+    result_sender: Sender<WriterMsg<Data>>,
 ) {
     let mut line_number: usize = 0;
     let mut tasks_count: usize = 0;
@@ -190,18 +192,18 @@ pub async fn csv_read_loop(
 }
 
 
-pub async fn prepare_workers<FutureFactory, FutureFactoryResult, FutureProcessor, FutureResult>(
+pub async fn prepare_workers<Data: Clone + Debug + Send + Sync + 'static, FutureFactory, FutureFactoryResult, FutureProcessor, FutureResult>(
     workers_count: usize,
-    task_receiver: Receiver<TaskRow>,
-    task_sender: Sender<TaskRow>,
-    result_sender: Sender<WriterMsg>,
+    task_receiver: Receiver<TaskRow<Data>>,
+    task_sender: Sender<TaskRow<Data>>,
+    result_sender: Sender<WriterMsg<Data>>,
     process_entry_factory: FutureFactory,
     retries: usize,
 ) where
     FutureFactory: Fn(String) -> FutureFactoryResult + Clone + Send + Sync + 'static,
     FutureFactoryResult: Future<Output=FutureProcessor> + Send,
-    FutureProcessor: FnMut(TaskRow) -> FutureResult + Send,
-    FutureResult: Future<Output=TaskResult> + Send
+    FutureProcessor: FnMut(TaskRow<Data>) -> FutureResult + Send,
+    FutureResult: Future<Output=TaskResult<Data>> + Send
 {
     let mut workers = vec![];
     for n in 0..workers_count {

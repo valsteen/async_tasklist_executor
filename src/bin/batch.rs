@@ -105,7 +105,7 @@ fn main() -> Result<(), String> {
     let future_factory = |worker_id: String| async move {
         // demonstrates a modifiable state between calls
         let mut state = ProcessState { request_count: 0, worker_name: worker_id };
-        move |parameter: TaskRow| {
+        move |parameter: TaskRow<String>| {
             state.request_count += 1;
             process_entry(format!("{} Request {}", state.worker_name, state.request_count),
                           parameter)
