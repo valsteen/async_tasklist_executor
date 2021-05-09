@@ -1,7 +1,7 @@
 use std::fmt::{Debug, Display, Formatter};
 
-use async_std::channel::{Receiver, Sender};
-use async_std::fs::File;
+use async_std::channel::{bounded, Receiver, Sender, unbounded};
+use async_std::fs::{File, OpenOptions};
 use async_std::future::Future;
 use async_std::task;
 use chrono::Local;
@@ -13,7 +13,7 @@ use log::{error, info};
 pub mod process_entry;
 
 #[derive(Clone, Debug)]
-pub struct TaskRow<Data> where Data : Clone {
+pub struct TaskRow<Data> where Data: Clone {
     pub line: usize,
     pub data: Data,
     pub success_ts: Option<String>,
@@ -48,8 +48,7 @@ pub enum TaskResult<Data: Clone> {
 pub async fn write_loop<Data>(
     mut csv_writer: AsyncWriter<File>,
     result_receiver: Receiver<WriterMsg<Data>>,
-) where Data : Display + Clone {
-
+) where Data: Display + Clone {
     let mut read_count = None;
     let mut write_count = 0;
 
@@ -63,7 +62,7 @@ pub async fn write_loop<Data>(
 
                 if write_count >= s {
                     info!("all records written out, leaving");
-                    return ;
+                    return;
                 }
 
                 continue;
@@ -97,7 +96,7 @@ pub async fn write_loop<Data>(
             assert!(write_count <= read_count);
             if write_count >= read_count {
                 info!("all records written out, leaving");
-                return ;
+                return;
             }
         }
     }
@@ -105,7 +104,7 @@ pub async fn write_loop<Data>(
 
 
 pub async fn make_task_row<Data: Clone>(record: StringRecord, line_number: usize) -> Result<TaskRow<Data>, String>
-where Data : From<String>
+    where Data: From<String>
 {
     let url = match record.get(0) {
         None => {
@@ -137,7 +136,7 @@ where Data : From<String>
 
 pub enum WriterMsg<Data: Clone> {
     TaskRow(TaskRow<Data>),
-    Eof(usize)
+    Eof(usize),
 }
 
 pub async fn csv_read_loop<Data: Clone + From<String> + Debug>(
@@ -168,10 +167,10 @@ pub async fn csv_read_loop<Data: Clone + From<String> + Debug>(
             }
         };
 
-        tasks_count += 1 ;
+        tasks_count += 1;
 
         if task_row.success_ts.is_some() {
-            if let Err(e) = result_sender.send( WriterMsg::TaskRow(task_row.clone())).await {
+            if let Err(e) = result_sender.send(WriterMsg::TaskRow(task_row.clone())).await {
                 error!("cannot write back {:?} ({}), quitting", task_row, e);
                 return;
             }
@@ -179,7 +178,7 @@ pub async fn csv_read_loop<Data: Clone + From<String> + Debug>(
         } else if let Err(e) = task_sender.send(task_row.clone()).await {
             error!("cannot send task, writing back {:?} ( {} )", task_row, e);
             task_row.error = Some("Shutdown".to_string());
-            if let Err(e) = result_sender.send( WriterMsg::TaskRow(task_row)).await {
+            if let Err(e) = result_sender.send(WriterMsg::TaskRow(task_row)).await {
                 error!("cannot write back unprocessed ({}), quitting", e);
                 return;
             };
@@ -226,7 +225,7 @@ pub async fn prepare_workers<Data: Clone + Debug + Send + Sync + 'static, Future
                     TaskResult::Success(mut task_row) => {
                         task_row.success_ts = Some(Local::now().to_rfc3339());
                         task_row.error = None;
-                        if let Err(e) = result_sender.send( WriterMsg::TaskRow(task_row.clone())).await {
+                        if let Err(e) = result_sender.send(WriterMsg::TaskRow(task_row.clone())).await {
                             error!("Could not output successful record {:?} : {}, quitting", task_row, e);
                             return;
                         }
@@ -266,4 +265,88 @@ pub async fn prepare_workers<Data: Clone + Debug + Send + Sync + 'static, Future
     }
 
     join_all(workers).await;
+}
+
+
+pub fn start<
+    Data: Clone + Display + Debug + Send + Sync + From<String> + 'static,
+    FutureFactory,
+    FutureFactoryResult,
+    FutureProcessor,
+    FutureResult
+>(
+    input_filename: String,
+    output_filename: String,
+    future_factory: FutureFactory,
+    workers_count: usize,
+    retries: usize
+) -> Result<(), String>
+    where
+        FutureFactory: Fn(String) -> FutureFactoryResult + Clone + Send + Sync + 'static,
+        FutureFactoryResult: Future<Output=FutureProcessor> + Send + 'static,
+        FutureProcessor: FnMut(TaskRow<Data>) -> FutureResult + Send + 'static,
+        FutureResult: Future<Output=TaskResult<Data>> + Send + 'static
+{
+    let csv_reader = {
+        let input_file = task::block_on(File::open(input_filename.clone()))
+            .map_err(|e| format!("Cannot open file {} for reading: {}", input_filename, e))?;
+        csv_async::AsyncReaderBuilder::new()
+            .has_headers(false)
+            .flexible(true)
+            .delimiter(b';')
+            .create_reader(input_file)
+    };
+
+    let csv_writer = {
+        let output_file = task::block_on(
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(output_filename.clone()),
+        )
+            .map_err(|e| format!("Cannot open file {} for writing: {}", output_filename, e))?;
+        csv_async::AsyncWriterBuilder::new()
+            .has_headers(false)
+            .delimiter(b';')
+            .flexible(true)
+            .create_writer(output_file)
+    };
+
+    // TODO in order to not load all csv in memory, task_sender/receiver channel should be bounded,
+    // but we then need a non-bounded retry channel, or workers may block at retrying.
+    let (task_sender, task_receiver) = unbounded();
+    let (result_sender, result_receiver) = bounded(workers_count);
+    {
+        let task_sender = task_sender.clone();
+        ctrlc::set_handler(move || {
+            task_sender.close();
+        })
+    }.expect("Error setting Ctrl-C handler");
+
+
+    task::block_on(async {
+        let workers_handle = task::spawn(prepare_workers(
+            workers_count,
+            task_receiver,
+            task_sender.clone(),
+            result_sender.clone(),
+            future_factory,
+            retries,
+        ));
+        let csv_reader_handle = task::spawn(csv_read_loop(
+            csv_reader,
+            task_sender.clone(),
+            result_sender,
+        ));
+
+        // ends once all tasks have been written out
+        write_loop(csv_writer, result_receiver).await;
+
+        // this stops workers
+        task_sender.close();
+
+        join_all(vec![workers_handle, csv_reader_handle]).await;
+    });
+
+    Ok(())
 }
