@@ -1,8 +1,8 @@
 use clap::{App, Arg};
 use log::LevelFilter;
 
-use async_tasklist_executor::{start, TaskRow};
-use async_tasklist_executor::process_entry::process_entry;
+use async_tasklist_executor::tasklist_executor::{start, TaskRow};
+use async_tasklist_executor::example_process_entry::process_entry;
 
 struct ProcessState {
     request_count: usize,

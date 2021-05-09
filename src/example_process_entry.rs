@@ -3,7 +3,7 @@ use core::time::Duration;
 
 use log::{error, info};
 
-use crate::{TaskError, TaskResult, TaskRow};
+use crate::tasklist_executor::{TaskError, TaskResult, TaskRow};
 use std::fmt::Display;
 use reqwest::IntoUrl;
 
