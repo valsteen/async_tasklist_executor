@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Display, Formatter};
 
-use async_std::channel::{bounded, Receiver, Sender, unbounded};
+use async_std::channel::{bounded, Receiver, Sender};
 use async_std::fs::{File, OpenOptions};
 use async_std::future::Future;
 use async_std::task;
@@ -27,9 +27,9 @@ pub enum TaskError {
 
 impl Display for TaskError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&match self {
+        std::fmt::Display::fmt(&match self {
             TaskError::ProcessingError(msg) => msg.clone(),
-            TaskError::Shutdown => "shutdown before completion".to_string(),
+            TaskError::Shutdown => "Shutdown".to_string(),
         }, f)
     }
 }
@@ -231,23 +231,45 @@ async fn prepare_workers<Data: Clone + Debug + Send + Sync + 'static, FutureFact
                     }
                     TaskResult::Error(mut task_row, task_error) => {
                         task_row.success_ts = None;
-                        task_row.error = Some(task_error.to_string());
+                        let error_msg = if let TaskError::Shutdown = task_error {
+                            if task_row.error.is_some() {
+                                if task_row.attempt > 0 {
+                                    format!("Shutdown before retrying ( last error: {} )", task_row.error.unwrap())
+                                } else {
+                                    format!("Shutdown before processing ( original error: {} )", task_row.error.unwrap())
+                                }
+                            } else {
+                                "Shutdown before processing".to_string()
+                            }
+                        } else {
+                            task_error.to_string()
+                        };
+                        task_row.error = Some(error_msg);
                         task_row
                     }
                     TaskResult::Retry(mut task_row, task_error) => {
+                        task_row.error = Some(task_error.to_string());
                         task_row.attempt += 1;
                         if task_row.attempt <= retries {
-                            match task_sender.send(task_row.clone()).await {
-                                Ok(_) => {
-                                    continue;
-                                }
-                                Err(e) => {
+                            // since task sender is bounded we may block at writing, while all
+                            // other workers are blocked at writing. in order to stay bounded
+                            // which serves as a rate limit of memory usage by blocking the csv
+                            // reader, here the hack is to emulate an unbounded retry channel by
+                            // spawning a task that pushes to the channel
+                            let task_sender = task_sender.clone();
+                            let result_sender = result_sender.clone();
+
+                            task::spawn(async move {
+                                if let Err(e) = task_sender.send(task_row.clone()).await {
                                     error!("Could not send {:?} for retry ( {} )", task_row, e);
-                                    // let task_row go through the error processing
+                                    task_row.error = Some(format!("Shutdown before retrying ( last error: {} )", task_row.error.unwrap()));
+                                    if let Err(e) = result_sender.send(WriterMsg::TaskRow(task_row.clone())).await {
+                                        error!("Could not output failed record {:?} : dropping it ( {} )", task_row, e);
+                                    }
                                 }
-                            }
+                            });
+                            continue;
                         }
-                        task_row.error = Some(task_error.to_string());
                         task_row
                     }
                 };
@@ -312,9 +334,7 @@ pub fn start<
             .create_writer(output_file)
     };
 
-    // TODO in order to not load all csv in memory, task_sender/receiver channel should be bounded,
-    // but we then need a non-bounded retry channel, or workers may block at retrying.
-    let (task_sender, task_receiver) = unbounded();
+    let (task_sender, task_receiver) = bounded(workers_count);
     let (result_sender, result_receiver) = bounded(workers_count);
     {
         let task_sender = task_sender.clone();
