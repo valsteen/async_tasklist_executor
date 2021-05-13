@@ -1,8 +1,8 @@
 use clap::{App, Arg};
 use log::LevelFilter;
 
-use async_tasklist_executor::tasklist_executor::{start, TaskRow};
 use async_tasklist_executor::example_process_entry::process_entry;
+use async_tasklist_executor::tasklist_executor::{TaskListExecutor, TaskRow};
 
 struct ProcessState {
     request_count: usize,
@@ -60,20 +60,25 @@ fn main() -> Result<(), String> {
     // be read/change at every iteration
     let future_factory = |worker_id: String| async move {
         // demonstrates a modifiable state between calls
-        let mut state = ProcessState { request_count: 0, worker_name: worker_id };
+        let mut state = ProcessState {
+            request_count: 0,
+            worker_name: worker_id,
+        };
         move |parameter: TaskRow<String>| {
             state.request_count += 1;
-            process_entry(format!("{} Request {}", state.worker_name, state.request_count),
-                          parameter)
+            process_entry(
+                format!("{} Request {}", state.worker_name, state.request_count),
+                parameter,
+            )
         }
     };
 
-    start(
+    TaskListExecutor::start(
         arg_matches.value_of("input").unwrap().to_string(),
         arg_matches.value_of("output").unwrap().to_string(),
         future_factory,
         workers,
-        retries
+        retries,
     )?;
 
     Ok(())

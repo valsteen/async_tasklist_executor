@@ -4,11 +4,15 @@ use core::time::Duration;
 use log::{error, info};
 
 use crate::tasklist_executor::{TaskError, TaskResult, TaskRow};
-use std::fmt::Display;
 use reqwest::IntoUrl;
+use std::fmt::Display;
 
-pub async fn process_entry<Data: Display>(worker_id: String, task_row: TaskRow<Data>) -> TaskResult<Data>
-where Data : Clone + IntoUrl
+pub async fn process_entry<Data: Display>(
+    worker_id: String,
+    task_row: TaskRow<Data>,
+) -> TaskResult<Data>
+where
+    Data: Clone + IntoUrl,
 {
     let client = reqwest::blocking::ClientBuilder::new()
         .connect_timeout(Duration::from_millis(4000))
@@ -42,7 +46,7 @@ where Data : Clone + IntoUrl
                 );
                 TaskResult::Success(task_row)
             }
-        },
+        }
         Err(e) => {
             // note that client.execute can return a "channel closed" error message, this is its own
             // channel, not from this library
