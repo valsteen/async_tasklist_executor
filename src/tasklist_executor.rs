@@ -12,6 +12,7 @@ use csv_async::{AsyncWriter, StringRecord, StringRecordsIntoStream};
 use futures::future::join_all;
 use futures::StreamExt;
 use log::{error, info};
+use async_std::stream::Stream;
 
 #[derive(Clone, Debug)]
 pub struct TaskRow<Data>
@@ -165,13 +166,14 @@ enum WriterMsg<Data: Clone> {
     Eof(usize),
 }
 
-async fn read_loop<Data: Clone + From<String> + Debug, MakeTask>(
-    mut reader: StringRecordsIntoStream<'_, File>,
+async fn read_loop<Data: Clone + From<String> + Debug, MakeTask, Record, RecordStream>(
+    mut reader: RecordStream,
     task_sender: Sender<TaskRow<Data>>,
     result_sender: Sender<WriterMsg<Data>>,
     make_task: MakeTask,
 ) where
-    MakeTask: Fn(Result<StringRecord, csv_async::Error>, usize) -> Result<TaskRow<Data>, String>,
+    MakeTask: Fn(Record, usize) -> Result<TaskRow<Data>, String>,
+    RecordStream: Stream<Item=Record> + Unpin
 {
     let mut line_number: usize = 0;
     let mut tasks_count: usize = 0;
