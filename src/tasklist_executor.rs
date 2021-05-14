@@ -11,6 +11,8 @@ use futures::future::join_all;
 use futures::StreamExt;
 use log::{error, info};
 use async_std::stream::Stream;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 #[derive(Clone, Debug)]
 pub struct TaskRow<Data>
@@ -49,11 +51,34 @@ pub enum TaskResult<Data: Clone> {
     Retry(TaskRow<Data>, String),
 }
 
-async fn write_loop<Data>(
-    mut csv_writer: AsyncWriter<File>,
+
+async fn write_csv_record<Data: Clone + Display>(writer: Rc<RefCell<AsyncWriter<File>>>, task_row: TaskRow<Data>) -> Result<(), String> {
+    let record = match task_row.success_ts {
+        None => StringRecord::from(vec![
+            task_row.data.to_string(),
+            "".to_string(),
+            task_row.error.unwrap_or_default(),
+        ]),
+        Some(ts) => StringRecord::from(vec![task_row.data.to_string(), ts]),
+    };
+
+    let mut writer = RefCell::borrow_mut(&writer);
+    if let Err(e) = writer.write_record(&record).await {
+        error!("Error while writing back {:?} ({}), quitting", record, e);
+        return Err(e.to_string());
+    }
+
+    Ok(())
+}
+
+
+async fn write_loop<Data, Writer, WriterResult>(
+    mut write_record: Writer,
     result_receiver: Receiver<WriterMsg<Data>>,
 ) where
-    Data: Display + Clone,
+    Data: Display + Debug + Clone,
+    Writer: FnMut(TaskRow<Data>) -> WriterResult,
+    WriterResult: Future<Output=Result<(), String>>
 {
     let mut read_count = None;
     let mut write_count = 0;
@@ -75,19 +100,10 @@ async fn write_loop<Data>(
             }
         };
 
-        let record = match task_row.success_ts {
-            None => StringRecord::from(vec![
-                task_row.data.to_string(),
-                "".to_string(),
-                task_row.error.unwrap_or_default(),
-            ]),
-            Some(ts) => StringRecord::from(vec![task_row.data.to_string(), ts]),
-        };
-
-        if let Err(e) = csv_writer.write_record(&record).await {
-            error!("Error while writing back {:?} ({}), quitting", record, e);
+        if let Err(e) = write_record(task_row.clone()).await {
+            error!("Error while writing back {:?} ({}), quitting", task_row, e);
             return;
-        }
+        };
 
         write_count += 1;
 
@@ -324,6 +340,16 @@ TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, Futu
                 .create_reader(input_file)
         };
 
+        let (task_sender, task_receiver) = bounded(workers_count);
+        let (result_sender, result_receiver) = bounded(workers_count);
+        {
+            let task_sender = task_sender.clone();
+            ctrlc::set_handler(move || {
+                task_sender.close();
+            })
+        }
+            .expect("Error setting Ctrl-C handler");
+
         let csv_writer = {
             let output_file = task::block_on(
                 OpenOptions::new()
@@ -338,16 +364,6 @@ TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, Futu
                 .flexible(true)
                 .create_writer(output_file)
         };
-
-        let (task_sender, task_receiver) = bounded(workers_count);
-        let (result_sender, result_receiver) = bounded(workers_count);
-        {
-            let task_sender = task_sender.clone();
-            ctrlc::set_handler(move || {
-                task_sender.close();
-            })
-        }
-            .expect("Error setting Ctrl-C handler");
 
         task::block_on(async {
             let workers_handle = task::spawn(TaskListExecutor::prepare_workers(
@@ -371,8 +387,12 @@ TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, Futu
                 }
             });
 
+            let csv_writer = Rc::new(RefCell::new(csv_writer));
+
+            let writer = move |task_row| write_csv_record(csv_writer.clone(), task_row);
+
             // ends once all tasks have been written out
-            write_loop(csv_writer, result_receiver).await;
+            write_loop(writer, result_receiver).await;
 
             // this stops workers
             task_sender.close();
