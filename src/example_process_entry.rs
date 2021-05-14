@@ -6,6 +6,7 @@ use log::{error, info};
 use crate::tasklist_executor::{TaskError, TaskResult, TaskRow};
 use reqwest::IntoUrl;
 use std::fmt::Display;
+use csv_async::StringRecord;
 
 pub async fn process_entry<Data: Display>(
     worker_id: String,
@@ -57,4 +58,48 @@ where
             TaskResult::Retry(task_row, e.to_string())
         }
     }
+}
+
+
+pub fn make_task_row<Data: Clone>(
+    record: Result<StringRecord, csv_async::Error>,
+    line_number: usize,
+) -> Result<TaskRow<Data>, String>
+    where
+        Data: From<String>,
+{
+    let record = match record {
+        Ok(record) => record,
+        Err(err) => {
+            error!("line {}: skipping record ({})", line_number, err);
+            return Err("invalid line".to_string());
+        }
+    };
+
+    let url = match record.get(0) {
+        None => {
+            info!("line {}: skipping empty line", line_number);
+            return Err("empty line".to_string());
+        }
+        Some(url) => url.to_string(),
+    };
+
+    let success_ts = match record.get(1) {
+        None => None,
+        Some(ts) => {
+            if ts.is_empty() {
+                None
+            } else {
+                Some(ts.to_string())
+            }
+        }
+    };
+
+    Ok(TaskRow {
+        line: line_number,
+        data: url.into(),
+        success_ts,
+        error: None,
+        attempt: 0,
+    })
 }

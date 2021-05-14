@@ -2,7 +2,7 @@ use clap::{App, Arg};
 use log::LevelFilter;
 
 use async_tasklist_executor::csv::csv_stream;
-use async_tasklist_executor::example_process_entry::process_entry;
+use async_tasklist_executor::example_process_entry::{process_entry, make_task_row};
 use async_tasklist_executor::tasklist_executor::{TaskListExecutor, TaskRow};
 
 struct ProcessState {
@@ -76,6 +76,7 @@ fn main() -> Result<(), String> {
 
     TaskListExecutor::start(
         csv_stream(arg_matches.value_of("input").unwrap().to_string())?,
+        make_task_row,
         arg_matches.value_of("output").unwrap().to_string(),
         future_factory,
         workers,

@@ -8,7 +8,7 @@ use async_std::fs::{File, OpenOptions};
 use async_std::future::Future;
 use async_std::task;
 use chrono::Local;
-use csv_async::{AsyncWriter, StringRecord, StringRecordsIntoStream};
+use csv_async::{AsyncWriter, StringRecord};
 use futures::future::join_all;
 use futures::StreamExt;
 use log::{error, info};
@@ -118,122 +118,83 @@ async fn write_loop<Data, Writer, WriterResult>(
     }
 }
 
-fn make_task_row<Data: Clone>(
-    record: Result<StringRecord, csv_async::Error>,
-    line_number: usize,
-) -> Result<TaskRow<Data>, String>
-where
-    Data: From<String>,
-{
-    let record = match record {
-        Ok(record) => record,
-        Err(err) => {
-            error!("line {}: skipping record ({})", line_number, err);
-            return Err("invalid line".to_string());
-        }
-    };
-
-    let url = match record.get(0) {
-        None => {
-            info!("line {}: skipping empty line", line_number);
-            return Err("empty line".to_string());
-        }
-        Some(url) => url.to_string(),
-    };
-
-    let success_ts = match record.get(1) {
-        None => None,
-        Some(ts) => {
-            if ts.is_empty() {
-                None
-            } else {
-                Some(ts.to_string())
-            }
-        }
-    };
-
-    Ok(TaskRow {
-        line: line_number,
-        data: url.into(),
-        success_ts,
-        error: None,
-        attempt: 0,
-    })
-}
-
 enum WriterMsg<Data: Clone> {
     TaskRow(TaskRow<Data>),
     Eof(usize),
 }
 
-async fn read_loop<Data: Clone + From<String> + Debug, MakeTask, Record, RecordStream>(
-    mut reader: RecordStream,
-    task_sender: Sender<TaskRow<Data>>,
-    result_sender: Sender<WriterMsg<Data>>,
-    make_task: MakeTask,
-) where
-    MakeTask: Fn(Record, usize) -> Result<TaskRow<Data>, String>,
-    RecordStream: Stream<Item=Record> + Unpin
-{
-    let mut line_number: usize = 0;
-    let mut tasks_count: usize = 0;
 
-    while let Some(record) = reader.next().await {
-        line_number += 1;
-        let line_result = make_task(record, line_number);
-
-        let mut task_row = match line_result {
-            Ok(task_row) => task_row,
-            Err(_) => {
-                continue;
-            }
-        };
-
-        tasks_count += 1;
-
-        if task_row.success_ts.is_some() {
-            if let Err(e) = result_sender
-                .send(WriterMsg::TaskRow(task_row.clone()))
-                .await
-            {
-                error!("cannot write back {:?} ({}), quitting", task_row, e);
-                return;
-            }
-            continue;
-        } else if let Err(e) = task_sender.send(task_row.clone()).await {
-            error!("cannot send task, writing back {:?} ( {} )", task_row, e);
-            task_row.error = Some("Shutdown".to_string());
-            if let Err(e) = result_sender.send(WriterMsg::TaskRow(task_row)).await {
-                error!("cannot write back unprocessed ({}), quitting", e);
-                return;
-            };
-        };
-    }
-
-    if let Err(e) = result_sender.send(WriterMsg::Eof(tasks_count)).await {
-        error!("cannot send eof after {} tasks ( {} )", tasks_count, e);
-    }
-}
-
-pub struct TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult>
+pub struct TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult, Record, RecordStream, MakeTask>
 {
     data: PhantomData<Data>,
     data1: PhantomData<FutureProcessor>,
     data2: PhantomData<FutureFactoryResult>,
     data3: PhantomData<FutureFactory>,
     data4: PhantomData<FutureResult>,
+    data5: PhantomData<Record>,
+    data6: PhantomData<RecordStream>,
+    data7: PhantomData<MakeTask>,
 }
 
-// if I use a struct, then I don't need associated types, the repetition is prevented in a single "where"
-impl<Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult>
-    TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult>
+
+impl<Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult, Record, RecordStream, MakeTask>
+    TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult, Record, RecordStream, MakeTask>
 where
     Data: Clone + Debug + Send + Sync + Display + From<String> + 'static,
     FutureProcessor: FnMut(TaskRow<Data>) -> FutureResult + Send + 'static,
     FutureFactoryResult: Future<Output = FutureProcessor> + Send + 'static,
     FutureFactory: Fn(String) -> FutureFactoryResult + Clone + Send + Sync + 'static,
     FutureResult: Future<Output = TaskResult<Data>> + Send + 'static,
+    RecordStream: Stream<Item=Record> + Unpin + Send + 'static,
+    Record: Send + 'static,
+    MakeTask: Fn(Record, usize) -> Result<TaskRow<Data>, String> + Send + 'static,
 {
+    async fn read_loop(
+        mut reader: RecordStream,
+        task_sender: Sender<TaskRow<Data>>,
+        result_sender: Sender<WriterMsg<Data>>,
+        make_task: MakeTask,
+    ) {
+        let mut line_number: usize = 0;
+        let mut tasks_count: usize = 0;
+
+        while let Some(record) = reader.next().await {
+            line_number += 1;
+            let line_result = make_task(record, line_number);
+
+            let mut task_row = match line_result {
+                Ok(task_row) => task_row,
+                Err(_) => {
+                    continue;
+                }
+            };
+
+            tasks_count += 1;
+
+            if task_row.success_ts.is_some() {
+                if let Err(e) = result_sender
+                    .send(WriterMsg::TaskRow(task_row.clone()))
+                    .await
+                {
+                    error!("cannot write back {:?} ({}), quitting", task_row, e);
+                    return;
+                }
+                continue;
+            } else if let Err(e) = task_sender.send(task_row.clone()).await {
+                error!("cannot send task, writing back {:?} ( {} )", task_row, e);
+                task_row.error = Some("Shutdown".to_string());
+                if let Err(e) = result_sender.send(WriterMsg::TaskRow(task_row)).await {
+                    error!("cannot write back unprocessed ({}), quitting", e);
+                    return;
+                };
+            };
+        }
+
+        if let Err(e) = result_sender.send(WriterMsg::Eof(tasks_count)).await {
+            error!("cannot send eof after {} tasks ( {} )", tasks_count, e);
+        }
+    }
+
     async fn prepare_workers(
         workers_count: usize,
         task_receiver: Receiver<TaskRow<Data>>,
@@ -328,7 +289,8 @@ where
     }
 
     pub fn start(
-        input_stream: StringRecordsIntoStream<'static, File>,
+        input_stream: RecordStream,
+        make_task: MakeTask,
         output_filename: String,
         future_factory: FutureFactory,
         workers_count: usize,
@@ -360,7 +322,7 @@ where
         };
 
         task::block_on(async {
-            let workers_handle = task::spawn(TaskListExecutor::prepare_workers(
+            let workers_handle = task::spawn(Self::prepare_workers(
                 workers_count,
                 task_receiver,
                 task_sender.clone(),
@@ -371,7 +333,7 @@ where
             let csv_reader_handle = task::spawn({
                 let task_sender = task_sender.clone();
                 async move {
-                    read_loop(input_stream, task_sender, result_sender, make_task_row).await
+                    Self::read_loop(input_stream, task_sender, result_sender, make_task).await
                 }
             });
 
