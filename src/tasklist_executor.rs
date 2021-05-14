@@ -1,23 +1,22 @@
+use std::cell::RefCell;
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
+use std::rc::Rc;
 
 use async_std::channel::{bounded, Receiver, Sender};
 use async_std::fs::{File, OpenOptions};
 use async_std::future::Future;
 use async_std::task;
 use chrono::Local;
-use csv_async::{AsyncWriter, StringRecord};
+use csv_async::{AsyncWriter, StringRecord, StringRecordsIntoStream};
 use futures::future::join_all;
 use futures::StreamExt;
 use log::{error, info};
-use async_std::stream::Stream;
-use std::rc::Rc;
-use std::cell::RefCell;
 
 #[derive(Clone, Debug)]
 pub struct TaskRow<Data>
-    where
-        Data: Clone,
+where
+    Data: Clone,
 {
     pub line: usize,
     pub data: Data,
@@ -51,8 +50,10 @@ pub enum TaskResult<Data: Clone> {
     Retry(TaskRow<Data>, String),
 }
 
-
-async fn write_csv_record<Data: Clone + Display>(writer: Rc<RefCell<AsyncWriter<File>>>, task_row: TaskRow<Data>) -> Result<(), String> {
+async fn write_csv_record<Data: Clone + Display>(
+    writer: Rc<RefCell<AsyncWriter<File>>>,
+    task_row: TaskRow<Data>,
+) -> Result<(), String> {
     let record = match task_row.success_ts {
         None => StringRecord::from(vec![
             task_row.data.to_string(),
@@ -71,14 +72,13 @@ async fn write_csv_record<Data: Clone + Display>(writer: Rc<RefCell<AsyncWriter<
     Ok(())
 }
 
-
 async fn write_loop<Data, Writer, WriterResult>(
     mut write_record: Writer,
     result_receiver: Receiver<WriterMsg<Data>>,
 ) where
     Data: Display + Debug + Clone,
     Writer: FnMut(TaskRow<Data>) -> WriterResult,
-    WriterResult: Future<Output=Result<(), String>>
+    WriterResult: Future<Output = Result<(), String>>,
 {
     let mut read_count = None;
     let mut write_count = 0;
@@ -121,8 +121,8 @@ fn make_task_row<Data: Clone>(
     record: Result<StringRecord, csv_async::Error>,
     line_number: usize,
 ) -> Result<TaskRow<Data>, String>
-    where
-        Data: From<String>,
+where
+    Data: From<String>,
 {
     let record = match record {
         Ok(record) => record,
@@ -165,12 +165,14 @@ enum WriterMsg<Data: Clone> {
     Eof(usize),
 }
 
-async fn read_loop<Data: Clone + From<String> + Debug, StreamType: Stream + Unpin, MakeTask>(
-    mut reader: StreamType,
+async fn read_loop<Data: Clone + From<String> + Debug, MakeTask>(
+    mut reader: StringRecordsIntoStream<'_, File>,
     task_sender: Sender<TaskRow<Data>>,
     result_sender: Sender<WriterMsg<Data>>,
     make_task: MakeTask,
-) where MakeTask: Fn(StreamType::Item, usize) -> Result<TaskRow<Data>, String> {
+) where
+    MakeTask: Fn(Result<StringRecord, csv_async::Error>, usize) -> Result<TaskRow<Data>, String>,
+{
     let mut line_number: usize = 0;
     let mut tasks_count: usize = 0;
 
@@ -222,13 +224,13 @@ pub struct TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFa
 
 // if I use a struct, then I don't need associated types, the repetition is prevented in a single "where"
 impl<Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult>
-TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult>
-    where
-        Data: Clone + Debug + Send + Sync + Display + From<String> + 'static,
-        FutureProcessor: FnMut(TaskRow<Data>) -> FutureResult + Send + 'static,
-        FutureFactoryResult: Future<Output=FutureProcessor> + Send + 'static,
-        FutureFactory: Fn(String) -> FutureFactoryResult + Clone + Send + Sync + 'static,
-        FutureResult: Future<Output=TaskResult<Data>> + Send + 'static,
+    TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult>
+where
+    Data: Clone + Debug + Send + Sync + Display + From<String> + 'static,
+    FutureProcessor: FnMut(TaskRow<Data>) -> FutureResult + Send + 'static,
+    FutureFactoryResult: Future<Output = FutureProcessor> + Send + 'static,
+    FutureFactory: Fn(String) -> FutureFactoryResult + Clone + Send + Sync + 'static,
+    FutureResult: Future<Output = TaskResult<Data>> + Send + 'static,
 {
     async fn prepare_workers(
         workers_count: usize,
@@ -324,22 +326,12 @@ TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, Futu
     }
 
     pub fn start(
-        input_filename: String,
+        input_stream: StringRecordsIntoStream<'static, File>,
         output_filename: String,
         future_factory: FutureFactory,
         workers_count: usize,
         retries: usize,
     ) -> Result<(), String> {
-        let mut csv_reader = {
-            let input_file = task::block_on(File::open(input_filename.clone()))
-                .map_err(|e| format!("Cannot open file {} for reading: {}", input_filename, e))?;
-            csv_async::AsyncReaderBuilder::new()
-                .has_headers(false)
-                .flexible(true)
-                .delimiter(b';')
-                .create_reader(input_file)
-        };
-
         let (task_sender, task_receiver) = bounded(workers_count);
         let (result_sender, result_receiver) = bounded(workers_count);
         {
@@ -348,7 +340,7 @@ TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, Futu
                 task_sender.close();
             })
         }
-            .expect("Error setting Ctrl-C handler");
+        .expect("Error setting Ctrl-C handler");
 
         let csv_writer = {
             let output_file = task::block_on(
@@ -357,7 +349,7 @@ TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, Futu
                     .create_new(true)
                     .open(output_filename.clone()),
             )
-                .map_err(|e| format!("Cannot open file {} for writing: {}", output_filename, e))?;
+            .map_err(|e| format!("Cannot open file {} for writing: {}", output_filename, e))?;
             csv_async::AsyncWriterBuilder::new()
                 .has_headers(false)
                 .delimiter(b';')
@@ -377,13 +369,7 @@ TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, Futu
             let csv_reader_handle = task::spawn({
                 let task_sender = task_sender.clone();
                 async move {
-                    let csv_input_stream = csv_reader.records();
-                    read_loop(
-                        csv_input_stream,
-                        task_sender,
-                        result_sender,
-                        make_task_row,
-                    ).await
+                    read_loop(input_stream, task_sender, result_sender, make_task_row).await
                 }
             });
 
