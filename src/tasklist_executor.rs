@@ -107,13 +107,10 @@ pub struct TaskListExecutor<
     TaskRowStream,
     RecordWriterType,
 > {
-    data: PhantomData<Data>,
-    data1: PhantomData<FutureProcessor>,
-    data2: PhantomData<FutureFactoryResult>,
-    data3: PhantomData<FutureFactory>,
-    data4: PhantomData<FutureResult>,
-    data5: PhantomData<TaskRowStream>,
-    data6: PhantomData<RecordWriterType>,
+    // Type parameters are declared at struct level in order to state the constraints only once.
+    // But rust requires a usage at that point, so this phantom data is a 0-sized field which
+    // has dummy references to the declared types.
+    phantom_data: PhantomData<(Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult, TaskRowStream, RecordWriterType)>,
 }
 
 pub trait RecordWriter {
@@ -125,7 +122,7 @@ pub trait RecordWriter {
 }
 
 impl<
-        Data,
+        Data: Clone + Debug + Send + Sync + Display + 'static,
         FutureProcessor,
         FutureFactoryResult,
         FutureFactory,
@@ -133,7 +130,8 @@ impl<
         TaskRowStream,
         RecordWriterType,
     >
-    TaskListExecutor<
+    TaskListExecutor
+    <
         Data,
         FutureProcessor,
         FutureFactoryResult,
