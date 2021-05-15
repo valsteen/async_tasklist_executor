@@ -151,7 +151,7 @@ impl<
         RecordWriterType,
     >
 where
-    Data: Clone + Debug + Send + Sync + Display + From<String> + 'static,
+    Data: Clone + Debug + Send + Sync + Display + 'static,
     FutureProcessor: FnMut(TaskRow<Data>) -> FutureResult + Send + 'static,
     FutureFactoryResult: Future<Output = FutureProcessor> + Send + 'static,
     FutureFactory: Fn(String) -> FutureFactoryResult + Clone + Send + Sync + 'static,

@@ -60,12 +60,10 @@ where
     }
 }
 
-pub fn make_task_row<Data: Clone>(
+pub fn make_task_row(
     record: Result<StringRecord, csv_async::Error>,
     line_number: usize,
-) -> Result<TaskRow<Data>, String>
-where
-    Data: From<String>,
+) -> Result<TaskRow<String>, String>
 {
     let record = match record {
         Ok(record) => record,
@@ -96,7 +94,7 @@ where
 
     Ok(TaskRow {
         line: line_number,
-        data: url.into(),
+        data: url,
         success_ts,
         error: None,
         attempt: 0,
