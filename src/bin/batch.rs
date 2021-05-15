@@ -59,7 +59,7 @@ fn main() -> Result<(), String> {
 
     // this way we can initialize a 'task processor' that can setup some state that can then
     // be read/change at every iteration
-    let future_factory = |worker_id: String| async move {
+    let row_processor_factory = |worker_id: String| async move {
         // demonstrates a modifiable state between calls
         let mut state = ProcessState {
             request_count: 0,
@@ -77,7 +77,7 @@ fn main() -> Result<(), String> {
     TaskListExecutor::start(
         csv_stream(arg_matches.value_of("input").unwrap().to_string())?,
         CsvWriter::new(arg_matches.value_of("output").unwrap().to_string())?,
-        future_factory,
+        row_processor_factory,
         workers,
         retries,
     )?;

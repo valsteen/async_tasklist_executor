@@ -100,17 +100,25 @@ enum WriterMsg<Data: Clone> {
 
 pub struct TaskListExecutor<
     Data,
-    FutureProcessor,
-    FutureFactoryResult,
-    FutureFactory,
-    FutureResult,
+    ProcessRow,
+    ProcessRowResult,
+    ProcessRowFactory,
+    ProcessRowFactoryResult,
     TaskRowStream,
     RecordWriterType,
 > {
     // Type parameters are declared at struct level in order to state the constraints only once.
     // But rust requires a usage at that point, so this phantom data is a 0-sized field which
     // has dummy references to the declared types.
-    phantom_data: PhantomData<(Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult, TaskRowStream, RecordWriterType)>,
+    phantom_data: PhantomData<(
+        Data,
+        ProcessRow,
+        ProcessRowFactoryResult,
+        ProcessRowFactory,
+        ProcessRowResult,
+        TaskRowStream,
+        RecordWriterType,
+    )>,
 }
 
 pub trait RecordWriter {
@@ -123,29 +131,28 @@ pub trait RecordWriter {
 
 impl<
         Data: Clone + Debug + Send + Sync + Display + 'static,
-        FutureProcessor,
-        FutureFactoryResult,
-        FutureFactory,
-        FutureResult,
+        ProcessRow,
+        ProcessRowFactoryResult,
+        ProcessRowFactory,
+        ProcessRowResult,
         TaskRowStream,
         RecordWriterType,
     >
-    TaskListExecutor
-    <
+    TaskListExecutor<
         Data,
-        FutureProcessor,
-        FutureFactoryResult,
-        FutureFactory,
-        FutureResult,
+        ProcessRow,
+        ProcessRowFactoryResult,
+        ProcessRowFactory,
+        ProcessRowResult,
         TaskRowStream,
         RecordWriterType,
     >
 where
     Data: Clone + Debug + Send + Sync + Display + 'static,
-    FutureProcessor: FnMut(TaskRow<Data>) -> FutureResult + Send + 'static,
-    FutureFactoryResult: Future<Output = FutureProcessor> + Send + 'static,
-    FutureFactory: Fn(String) -> FutureFactoryResult + Clone + Send + Sync + 'static,
-    FutureResult: Future<Output = TaskResult<Data>> + Send + 'static,
+    ProcessRow: FnMut(TaskRow<Data>) -> ProcessRowResult + Send + 'static,
+    ProcessRowResult: Future<Output = TaskResult<Data>> + Send + 'static,
+    ProcessRowFactory: Fn(String) -> ProcessRowFactoryResult + Clone + Send + Sync + 'static,
+    ProcessRowFactoryResult: Future<Output = ProcessRow> + Send + 'static,
     TaskRowStream: Stream<Item = TaskRow<Data>> + Unpin + Send + 'static,
     RecordWriterType: RecordWriter<DataType = Data> + 'static,
 {
@@ -188,7 +195,7 @@ where
         task_receiver: Receiver<TaskRow<Data>>,
         task_sender: Sender<TaskRow<Data>>,
         result_sender: Sender<WriterMsg<Data>>,
-        process_entry_factory: FutureFactory,
+        process_entry_factory: ProcessRowFactory,
         retries: usize,
     ) {
         let mut workers = vec![];
@@ -279,7 +286,7 @@ where
     pub fn start(
         input_stream: TaskRowStream,
         record_writer: RecordWriterType,
-        future_factory: FutureFactory,
+        process_row_factory: ProcessRowFactory,
         workers_count: usize,
         retries: usize,
     ) -> Result<(), String> {
@@ -301,7 +308,7 @@ where
                 task_receiver,
                 task_sender.clone(),
                 result_sender.clone(),
-                future_factory,
+                process_row_factory,
                 retries,
             ));
             let csv_reader_handle = task::spawn({
