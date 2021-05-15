@@ -4,9 +4,9 @@ use core::time::Duration;
 use log::{error, info};
 
 use crate::tasklist_executor::{TaskError, TaskResult, TaskRow};
+use csv_async::StringRecord;
 use reqwest::IntoUrl;
 use std::fmt::Display;
-use csv_async::StringRecord;
 
 pub async fn process_entry<Data: Display>(
     worker_id: String,
@@ -60,13 +60,12 @@ where
     }
 }
 
-
 pub fn make_task_row<Data: Clone>(
     record: Result<StringRecord, csv_async::Error>,
     line_number: usize,
 ) -> Result<TaskRow<Data>, String>
-    where
-        Data: From<String>,
+where
+    Data: From<String>,
 {
     let record = match record {
         Ok(record) => record,

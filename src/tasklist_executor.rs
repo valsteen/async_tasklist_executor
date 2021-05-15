@@ -1,18 +1,15 @@
-use std::cell::RefCell;
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
-use std::rc::Rc;
 
 use async_std::channel::{bounded, Receiver, Sender};
-use async_std::fs::{File, OpenOptions};
 use async_std::future::Future;
+use async_std::stream::Stream;
+use async_std::sync::Arc;
 use async_std::task;
 use chrono::Local;
-use csv_async::{AsyncWriter, StringRecord};
-use futures::future::join_all;
+use futures::future::{join_all, BoxFuture};
 use futures::StreamExt;
 use log::{error, info};
-use async_std::stream::Stream;
 
 #[derive(Clone, Debug)]
 pub struct TaskRow<Data>
@@ -51,35 +48,13 @@ pub enum TaskResult<Data: Clone> {
     Retry(TaskRow<Data>, String),
 }
 
-async fn write_csv_record<Data: Clone + Display>(
-    writer: Rc<RefCell<AsyncWriter<File>>>,
-    task_row: TaskRow<Data>,
-) -> Result<(), String> {
-    let record = match task_row.success_ts {
-        None => StringRecord::from(vec![
-            task_row.data.to_string(),
-            "".to_string(),
-            task_row.error.unwrap_or_default(),
-        ]),
-        Some(ts) => StringRecord::from(vec![task_row.data.to_string(), ts]),
-    };
-
-    let mut writer = RefCell::borrow_mut(&writer);
-    if let Err(e) = writer.write_record(&record).await {
-        error!("Error while writing back {:?} ({}), quitting", record, e);
-        return Err(e.to_string());
-    }
-
-    Ok(())
-}
-
 async fn write_loop<Data, Writer, WriterResult>(
     mut write_record: Writer,
     result_receiver: Receiver<WriterMsg<Data>>,
 ) where
     Data: Display + Debug + Clone,
     Writer: FnMut(TaskRow<Data>) -> WriterResult,
-    WriterResult: Future<Output = Result<(), String>>,
+    WriterResult: Future<Output = Result<(), String>> + Unpin,
 {
     let mut read_count = None;
     let mut write_count = 0;
@@ -123,9 +98,17 @@ enum WriterMsg<Data: Clone> {
     Eof(usize),
 }
 
-
-pub struct TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult, Record, RecordStream, MakeTask>
-{
+pub struct TaskListExecutor<
+    Data,
+    FutureProcessor,
+    FutureFactoryResult,
+    FutureFactory,
+    FutureResult,
+    Record,
+    RecordStream,
+    MakeTask,
+    RecordWriterType,
+> {
     data: PhantomData<Data>,
     data1: PhantomData<FutureProcessor>,
     data2: PhantomData<FutureFactoryResult>,
@@ -134,20 +117,49 @@ pub struct TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFa
     data5: PhantomData<Record>,
     data6: PhantomData<RecordStream>,
     data7: PhantomData<MakeTask>,
+    data8: PhantomData<RecordWriterType>,
 }
 
+pub trait RecordWriter {
+    type DataType: Clone;
+    fn write_record(
+        self: &Arc<Self>,
+        task_row: TaskRow<Self::DataType>,
+    ) -> BoxFuture<'static, Result<(), String>>;
+}
 
-impl<Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult, Record, RecordStream, MakeTask>
-    TaskListExecutor<Data, FutureProcessor, FutureFactoryResult, FutureFactory, FutureResult, Record, RecordStream, MakeTask>
+impl<
+        Data,
+        FutureProcessor,
+        FutureFactoryResult,
+        FutureFactory,
+        FutureResult,
+        Record,
+        RecordStream,
+        MakeTask,
+        RecordWriterType,
+    >
+    TaskListExecutor<
+        Data,
+        FutureProcessor,
+        FutureFactoryResult,
+        FutureFactory,
+        FutureResult,
+        Record,
+        RecordStream,
+        MakeTask,
+        RecordWriterType,
+    >
 where
     Data: Clone + Debug + Send + Sync + Display + From<String> + 'static,
     FutureProcessor: FnMut(TaskRow<Data>) -> FutureResult + Send + 'static,
     FutureFactoryResult: Future<Output = FutureProcessor> + Send + 'static,
     FutureFactory: Fn(String) -> FutureFactoryResult + Clone + Send + Sync + 'static,
     FutureResult: Future<Output = TaskResult<Data>> + Send + 'static,
-    RecordStream: Stream<Item=Record> + Unpin + Send + 'static,
+    RecordStream: Stream<Item = Record> + Unpin + Send + 'static,
     Record: Send + 'static,
     MakeTask: Fn(Record, usize) -> Result<TaskRow<Data>, String> + Send + 'static,
+    RecordWriterType: RecordWriter<DataType = Data> + 'static,
 {
     async fn read_loop(
         mut reader: RecordStream,
@@ -291,7 +303,7 @@ where
     pub fn start(
         input_stream: RecordStream,
         make_task: MakeTask,
-        output_filename: String,
+        record_writer: RecordWriterType,
         future_factory: FutureFactory,
         workers_count: usize,
         retries: usize,
@@ -306,20 +318,7 @@ where
         }
         .expect("Error setting Ctrl-C handler");
 
-        let csv_writer = {
-            let output_file = task::block_on(
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(output_filename.clone()),
-            )
-            .map_err(|e| format!("Cannot open file {} for writing: {}", output_filename, e))?;
-            csv_async::AsyncWriterBuilder::new()
-                .has_headers(false)
-                .delimiter(b';')
-                .flexible(true)
-                .create_writer(output_file)
-        };
+        let record_writer = Arc::new(record_writer);
 
         task::block_on(async {
             let workers_handle = task::spawn(Self::prepare_workers(
@@ -332,14 +331,10 @@ where
             ));
             let csv_reader_handle = task::spawn({
                 let task_sender = task_sender.clone();
-                async move {
-                    Self::read_loop(input_stream, task_sender, result_sender, make_task).await
-                }
+                async move { Self::read_loop(input_stream, task_sender, result_sender, make_task).await }
             });
 
-            let csv_writer = Rc::new(RefCell::new(csv_writer));
-
-            let writer = move |task_row| write_csv_record(csv_writer.clone(), task_row);
+            let writer = move |task_row| record_writer.write_record(task_row);
 
             // ends once all tasks have been written out
             write_loop(writer, result_receiver).await;
