@@ -77,15 +77,15 @@ pub struct CsvWriter {
 }
 
 impl CsvWriter {
-    pub fn new(filename: String) -> Result<Self, String> {
+    pub async fn new(filename: String) -> Result<Self, String> {
         let csv_writer = {
-            let output_file = task::block_on(
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(filename.clone()),
-            )
-            .map_err(|e| format!("Cannot open file {} for writing: {}", filename, e))?;
+            let output_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(filename.clone())
+                .await
+                .map_err(|e| format!("Cannot open file {} for writing: {}", filename, e))?;
+
             csv_async::AsyncWriterBuilder::new()
                 .has_headers(false)
                 .delimiter(b';')

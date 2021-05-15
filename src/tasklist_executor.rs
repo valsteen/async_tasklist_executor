@@ -105,11 +105,14 @@ pub struct TaskListExecutor<
     ProcessRowFactory,
     ProcessRowFactoryResult,
     TaskRowStream,
+    TaskRowStreamFactory,
+    FutureRecordWriterType,
     RecordWriterType,
 > {
     // Type parameters are declared at struct level in order to state the constraints only once.
     // But rust requires a usage at that point, so this phantom data is a 0-sized field which
     // has dummy references to the declared types.
+    #[allow(clippy::type_complexity)]
     phantom_data: PhantomData<(
         Data,
         ProcessRow,
@@ -117,6 +120,8 @@ pub struct TaskListExecutor<
         ProcessRowFactory,
         ProcessRowResult,
         TaskRowStream,
+        TaskRowStreamFactory,
+        FutureRecordWriterType,
         RecordWriterType,
     )>,
 }
@@ -136,6 +141,8 @@ impl<
         ProcessRowFactory,
         ProcessRowResult,
         TaskRowStream,
+        TaskRowStreamFactory,
+        FutureRecordWriterType,
         RecordWriterType,
     >
     TaskListExecutor<
@@ -145,6 +152,8 @@ impl<
         ProcessRowFactory,
         ProcessRowResult,
         TaskRowStream,
+        TaskRowStreamFactory,
+        FutureRecordWriterType,
         RecordWriterType,
     >
 where
@@ -154,15 +163,24 @@ where
     ProcessRowFactory: Fn(String) -> ProcessRowFactoryResult + Clone + Send + Sync + 'static,
     ProcessRowFactoryResult: Future<Output = ProcessRow> + Send + 'static,
     TaskRowStream: Stream<Item = TaskRow<Data>> + Unpin + Send + 'static,
+    TaskRowStreamFactory: Future<Output = Result<TaskRowStream, String>> + Unpin + Send + 'static,
     RecordWriterType: RecordWriter<DataType = Data> + 'static,
+    FutureRecordWriterType: Future<Output = Result<RecordWriterType, String>> + 'static,
 {
     async fn read_loop(
-        mut reader: TaskRowStream,
+        reader_factory: TaskRowStreamFactory,
         task_sender: Sender<TaskRow<Data>>,
         result_sender: Sender<WriterMsg<Data>>,
     ) {
         let mut tasks_count: usize = 0;
 
+        let mut reader = match reader_factory.await {
+            Ok(reader) => reader,
+            Err(err) => {
+                error!("{}, leaving reader", err);
+                return;
+            }
+        };
         while let Some(mut task_row) = reader.next().await {
             tasks_count += 1;
 
@@ -284,8 +302,8 @@ where
     }
 
     pub fn start(
-        input_stream: TaskRowStream,
-        record_writer: RecordWriterType,
+        input_stream_factory: TaskRowStreamFactory,
+        record_writer: FutureRecordWriterType,
         process_row_factory: ProcessRowFactory,
         workers_count: usize,
         retries: usize,
@@ -300,9 +318,15 @@ where
         }
         .expect("Error setting Ctrl-C handler");
 
-        let record_writer = Arc::new(record_writer);
-
         task::block_on(async {
+            let record_writer = match record_writer.await {
+                Ok(e) => e,
+                Err(e) => {
+                    return Err(e); // compiler won't figure out the type if using "?"
+                }
+            };
+            let record_writer = Arc::new(record_writer);
+
             let workers_handle = task::spawn(Self::prepare_workers(
                 workers_count,
                 task_receiver,
@@ -313,7 +337,7 @@ where
             ));
             let csv_reader_handle = task::spawn({
                 let task_sender = task_sender.clone();
-                async move { Self::read_loop(input_stream, task_sender, result_sender).await }
+                async move { Self::read_loop(input_stream_factory, task_sender, result_sender).await }
             });
 
             let writer = move |task_row| record_writer.write_record(task_row);
@@ -325,7 +349,8 @@ where
             task_sender.close();
 
             join_all(vec![workers_handle, csv_reader_handle]).await;
-        });
+            Ok(())
+        })?;
 
         Ok(())
     }
