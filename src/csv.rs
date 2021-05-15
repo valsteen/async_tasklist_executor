@@ -1,14 +1,55 @@
 use crate::tasklist_executor::{RecordWriter, TaskRow};
 use async_std::fs::{File, OpenOptions};
+use async_std::stream::Stream;
 use async_std::sync::{Arc, Mutex};
 use async_std::task;
+use csv_async::AsyncWriter;
 use csv_async::StringRecord;
-use csv_async::{AsyncWriter, StringRecordsIntoStream};
 use futures::future::BoxFuture;
-use log::error;
+use futures::StreamExt;
+use log::{error, info};
 
+fn make_task_row(
+    record: Result<StringRecord, csv_async::Error>,
+    line_number: usize,
+) -> Result<TaskRow<String>, String> {
+    let record = match record {
+        Ok(record) => record,
+        Err(err) => {
+            error!("line {}: skipping record ({})", line_number, err);
+            return Err("invalid line".to_string());
+        }
+    };
 
-pub fn csv_stream(filename: String) -> Result<StringRecordsIntoStream<'static, File>, String> {
+    let url = match record.get(0) {
+        None => {
+            info!("line {}: skipping empty line", line_number);
+            return Err("empty line".to_string());
+        }
+        Some(url) => url.to_string(),
+    };
+
+    let success_ts = match record.get(1) {
+        None => None,
+        Some(ts) => {
+            if ts.is_empty() {
+                None
+            } else {
+                Some(ts.to_string())
+            }
+        }
+    };
+
+    Ok(TaskRow {
+        line: line_number,
+        data: url,
+        success_ts,
+        error: None,
+        attempt: 0,
+    })
+}
+
+pub fn csv_stream(filename: String) -> Result<impl Stream<Item = TaskRow<String>>, String> {
     let csv_reader = {
         let input_file = task::block_on(File::open(filename.clone()))
             .map_err(|e| format!("Cannot open file {} for reading: {}", filename, e))?;
@@ -18,9 +59,18 @@ pub fn csv_stream(filename: String) -> Result<StringRecordsIntoStream<'static, F
             .delimiter(b';')
             .create_reader(input_file)
     };
-    Ok(csv_reader.into_records())
-}
 
+    let mut line_number = 0;
+    Ok(csv_reader.into_records().filter_map(move |record| {
+        Box::pin(async move {
+            line_number += 1;
+            match make_task_row(record, line_number) {
+                Ok(row) => Some(row),
+                Err(_) => None,
+            }
+        })
+    }))
+}
 
 pub struct CsvWriter {
     csv_writer: Mutex<AsyncWriter<File>>,

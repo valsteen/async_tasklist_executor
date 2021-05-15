@@ -104,9 +104,7 @@ pub struct TaskListExecutor<
     FutureFactoryResult,
     FutureFactory,
     FutureResult,
-    Record,
-    RecordStream,
-    MakeTask,
+    TaskRowStream,
     RecordWriterType,
 > {
     data: PhantomData<Data>,
@@ -114,10 +112,8 @@ pub struct TaskListExecutor<
     data2: PhantomData<FutureFactoryResult>,
     data3: PhantomData<FutureFactory>,
     data4: PhantomData<FutureResult>,
-    data5: PhantomData<Record>,
-    data6: PhantomData<RecordStream>,
-    data7: PhantomData<MakeTask>,
-    data8: PhantomData<RecordWriterType>,
+    data5: PhantomData<TaskRowStream>,
+    data6: PhantomData<RecordWriterType>,
 }
 
 pub trait RecordWriter {
@@ -134,9 +130,7 @@ impl<
         FutureFactoryResult,
         FutureFactory,
         FutureResult,
-        Record,
-        RecordStream,
-        MakeTask,
+        TaskRowStream,
         RecordWriterType,
     >
     TaskListExecutor<
@@ -145,9 +139,7 @@ impl<
         FutureFactoryResult,
         FutureFactory,
         FutureResult,
-        Record,
-        RecordStream,
-        MakeTask,
+        TaskRowStream,
         RecordWriterType,
     >
 where
@@ -156,31 +148,17 @@ where
     FutureFactoryResult: Future<Output = FutureProcessor> + Send + 'static,
     FutureFactory: Fn(String) -> FutureFactoryResult + Clone + Send + Sync + 'static,
     FutureResult: Future<Output = TaskResult<Data>> + Send + 'static,
-    RecordStream: Stream<Item = Record> + Unpin + Send + 'static,
-    Record: Send + 'static,
-    MakeTask: Fn(Record, usize) -> Result<TaskRow<Data>, String> + Send + 'static,
+    TaskRowStream: Stream<Item = TaskRow<Data>> + Unpin + Send + 'static,
     RecordWriterType: RecordWriter<DataType = Data> + 'static,
 {
     async fn read_loop(
-        mut reader: RecordStream,
+        mut reader: TaskRowStream,
         task_sender: Sender<TaskRow<Data>>,
         result_sender: Sender<WriterMsg<Data>>,
-        make_task: MakeTask,
     ) {
-        let mut line_number: usize = 0;
         let mut tasks_count: usize = 0;
 
-        while let Some(record) = reader.next().await {
-            line_number += 1;
-            let line_result = make_task(record, line_number);
-
-            let mut task_row = match line_result {
-                Ok(task_row) => task_row,
-                Err(_) => {
-                    continue;
-                }
-            };
-
+        while let Some(mut task_row) = reader.next().await {
             tasks_count += 1;
 
             if task_row.success_ts.is_some() {
@@ -301,8 +279,7 @@ where
     }
 
     pub fn start(
-        input_stream: RecordStream,
-        make_task: MakeTask,
+        input_stream: TaskRowStream,
         record_writer: RecordWriterType,
         future_factory: FutureFactory,
         workers_count: usize,
@@ -331,7 +308,7 @@ where
             ));
             let csv_reader_handle = task::spawn({
                 let task_sender = task_sender.clone();
-                async move { Self::read_loop(input_stream, task_sender, result_sender, make_task).await }
+                async move { Self::read_loop(input_stream, task_sender, result_sender).await }
             });
 
             let writer = move |task_row| record_writer.write_record(task_row);
