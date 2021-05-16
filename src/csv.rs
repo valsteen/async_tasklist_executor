@@ -1,4 +1,4 @@
-use crate::tasklist_executor::{RecordWriter, TaskPayload, TaskData};
+use crate::tasklist_executor::{RecordWriter, TaskData, TaskPayload};
 use async_std::fs::{File, OpenOptions};
 use async_std::stream::Stream;
 use async_std::sync::{Arc, Mutex};
@@ -8,8 +8,7 @@ use csv_async::StringRecord;
 use futures::future::BoxFuture;
 use futures::StreamExt;
 use log::{error, info};
-use std::fmt::{Display, Formatter, Debug};
-
+use std::fmt::{Debug, Display, Formatter};
 
 fn make_task_row(
     record: Result<StringRecord, csv_async::Error>,
@@ -56,12 +55,11 @@ pub struct InputData(String);
 
 impl Display for InputData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.0, f )
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
 impl TaskData for InputData {}
-
 
 pub fn csv_stream(filename: String) -> Result<impl Stream<Item = TaskPayload<InputData>>, String> {
     let csv_reader = {

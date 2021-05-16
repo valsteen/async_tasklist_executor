@@ -10,10 +10,10 @@ use chrono::Local;
 use futures::future::{join_all, BoxFuture};
 use futures::StreamExt;
 use log::{error, info};
+use std::pin::Pin;
 
 #[derive(Clone, Debug)]
-pub struct TaskPayload<Data: TaskData>
-{
+pub struct TaskPayload<Data: TaskData> {
     pub line: usize,
     pub data: Data,
     pub success_ts: Option<String>,
@@ -48,12 +48,12 @@ pub enum TaskResult<Data: TaskData> {
 
 pub trait TaskData: Clone + Debug + Send + Sync + Display + 'static {}
 
-pub trait TaskProcessor {
-    type ProcessTaskResult;
-    type FutureProcessTaskResult: Future<Output=Self::ProcessTaskResult>;
-    type Data: TaskData;
+pub trait TaskProcessorFactory<Data: TaskData>: Send + Sync + 'static {
+    fn new_task_processor(&self) -> BoxFuture<Pin<Box<dyn TaskProcessor<Data>>>>;
+}
 
-    fn process_task(&mut self, task_payload: TaskPayload<Self::Data>) -> Self::FutureProcessTaskResult;
+pub trait TaskProcessor<Data: TaskData>: Send + Sync {
+    fn process_task(&self, task_payload: TaskPayload<Data>) -> BoxFuture<TaskResult<Data>>;
 }
 
 async fn write_loop<Data: TaskData, Writer, WriterResult>(
@@ -67,8 +67,8 @@ async fn write_loop<Data: TaskData, Writer, WriterResult>(
     let mut write_count = 0;
 
     while let Ok(msg) = result_receiver.recv().await {
-        let task_row = match msg {
-            WriterMsg::TaskRow(task_row) => task_row,
+        let task_payload = match msg {
+            WriterMsg::Payload(task_payload) => task_payload,
             WriterMsg::Eof(s) => {
                 read_count = Some(s);
 
@@ -83,8 +83,11 @@ async fn write_loop<Data: TaskData, Writer, WriterResult>(
             }
         };
 
-        if let Err(e) = write_record(task_row.clone()).await {
-            error!("Error while writing back {:?} ({}), quitting", task_row, e);
+        if let Err(e) = write_record(task_payload.clone()).await {
+            error!(
+                "Error while writing back {:?} ({}), quitting",
+                task_payload, e
+            );
             return;
         };
 
@@ -101,18 +104,23 @@ async fn write_loop<Data: TaskData, Writer, WriterResult>(
 }
 
 enum WriterMsg<Data: TaskData> {
-    TaskRow(TaskPayload<Data>),
+    Payload(TaskPayload<Data>),
     Eof(usize),
+}
+
+pub trait RecordWriter {
+    type DataType: TaskData;
+    fn write_record(
+        self: &Arc<Self>,
+        task_payload: TaskPayload<Self::DataType>,
+    ) -> BoxFuture<'static, Result<(), String>>;
 }
 
 pub struct TaskListExecutor<
     Data,
-    ProcessRow,
-    ProcessRowResult,
-    ProcessRowFactory,
-    ProcessRowFactoryResult,
-    TaskRowStream,
-    TaskRowStreamFactory,
+    ProcessorFactory,
+    TaskPayloadStream,
+    TaskPayloadStreamFactory,
     FutureRecordWriterType,
     RecordWriterType,
 > {
@@ -122,59 +130,41 @@ pub struct TaskListExecutor<
     #[allow(clippy::type_complexity)]
     phantom_data: PhantomData<(
         Data,
-        ProcessRow,
-        ProcessRowFactoryResult,
-        ProcessRowFactory,
-        ProcessRowResult,
-        TaskRowStream,
-        TaskRowStreamFactory,
+        ProcessorFactory,
+        TaskPayloadStream,
+        TaskPayloadStreamFactory,
         FutureRecordWriterType,
         RecordWriterType,
     )>,
 }
 
-pub trait RecordWriter {
-    type DataType: TaskData;
-    fn write_record(
-        self: &Arc<Self>,
-        task_row: TaskPayload<Self::DataType>,
-    ) -> BoxFuture<'static, Result<(), String>>;
-}
-
 impl<
-        Data: TaskData,
-        ProcessRow,
-        ProcessRowFactoryResult,
-        ProcessRowFactory,
-        ProcessRowResult,
-        TaskRowStream,
-        TaskRowStreamFactory,
+        Data,
+        ProcessorFactory,
+        TaskPayloadStream,
+        TaskPayloadStreamFactory,
         FutureRecordWriterType,
         RecordWriterType,
     >
     TaskListExecutor<
         Data,
-        ProcessRow,
-        ProcessRowFactoryResult,
-        ProcessRowFactory,
-        ProcessRowResult,
-        TaskRowStream,
-        TaskRowStreamFactory,
+        ProcessorFactory,
+        TaskPayloadStream,
+        TaskPayloadStreamFactory,
         FutureRecordWriterType,
         RecordWriterType,
     >
 where
-    ProcessRow: FnMut(TaskPayload<Data>) -> ProcessRowResult + Send + 'static,
-    ProcessRowResult: Future<Output = TaskResult<Data>> + Send + 'static,
-    ProcessRowFactory: Fn(String) -> ProcessRowFactoryResult + Clone + Send + Sync + 'static,
-    ProcessRowFactoryResult: Future<Output = ProcessRow> + Send + 'static,
-    TaskRowStream: Stream<Item = TaskPayload<Data>> + Unpin + Send + 'static,
-    TaskRowStreamFactory: Future<Output = Result<TaskRowStream, String>> + Unpin + Send + 'static,
+    Data: TaskData,
+    ProcessorFactory: TaskProcessorFactory<Data>,
+    TaskPayloadStream: Stream<Item = TaskPayload<Data>> + Unpin + Send + 'static,
+    TaskPayloadStreamFactory:
+        Future<Output = Result<TaskPayloadStream, String>> + Unpin + Send + 'static,
     RecordWriterType: RecordWriter<DataType = Data> + 'static,
     FutureRecordWriterType: Future<Output = Result<RecordWriterType, String>> + 'static,
 {
     async fn read_loop(
-        reader_factory: TaskRowStreamFactory,
+        reader_factory: TaskPayloadStreamFactory,
         task_sender: Sender<TaskPayload<Data>>,
         result_sender: Sender<WriterMsg<Data>>,
     ) {
@@ -187,22 +177,25 @@ where
                 return;
             }
         };
-        while let Some(mut task_row) = reader.next().await {
+        while let Some(mut task_payload) = reader.next().await {
             tasks_count += 1;
 
-            if task_row.success_ts.is_some() {
+            if task_payload.success_ts.is_some() {
                 if let Err(e) = result_sender
-                    .send(WriterMsg::TaskRow(task_row.clone()))
+                    .send(WriterMsg::Payload(task_payload.clone()))
                     .await
                 {
-                    error!("cannot write back {:?} ({}), quitting", task_row, e);
+                    error!("cannot write back {:?} ({}), quitting", task_payload, e);
                     return;
                 }
                 continue;
-            } else if let Err(e) = task_sender.send(task_row.clone()).await {
-                error!("cannot send task, writing back {:?} ( {} )", task_row, e);
-                task_row.error = Some("Shutdown".to_string());
-                if let Err(e) = result_sender.send(WriterMsg::TaskRow(task_row)).await {
+            } else if let Err(e) = task_sender.send(task_payload.clone()).await {
+                error!(
+                    "cannot send task, writing back {:?} ( {} )",
+                    task_payload, e
+                );
+                task_payload.error = Some("Shutdown".to_string());
+                if let Err(e) = result_sender.send(WriterMsg::Payload(task_payload)).await {
                     error!("cannot write back unprocessed ({}), quitting", e);
                     return;
                 };
@@ -219,10 +212,12 @@ where
         task_receiver: Receiver<TaskPayload<Data>>,
         task_sender: Sender<TaskPayload<Data>>,
         result_sender: Sender<WriterMsg<Data>>,
-        process_entry_factory: ProcessRowFactory,
+        process_entry_factory: ProcessorFactory,
         retries: usize,
     ) {
         let mut workers = vec![];
+        let process_entry_factory = Arc::new(process_entry_factory);
+
         for n in 0..workers_count {
             let task_receiver = task_receiver.clone();
             let task_sender = task_sender.clone();
@@ -230,11 +225,11 @@ where
             let process_entry_factory = process_entry_factory.clone();
 
             workers.push(task::spawn(async move {
-                let mut process_entry = process_entry_factory(format!("Worker {}", n)).await;
+                let entry_processor = process_entry_factory.new_task_processor().await;
 
                 while let Ok(task_row) = task_receiver.recv().await {
                     let task_result = if !task_sender.is_closed() {
-                        process_entry(task_row.clone()).await
+                        entry_processor.process_task(task_row.clone()).await
                     } else {
                         TaskResult::Error(task_row, TaskError::Shutdown)
                     };
@@ -243,7 +238,7 @@ where
                         TaskResult::Success(mut task_row) => {
                             task_row.success_ts = Some(Local::now().to_rfc3339());
                             task_row.error = None;
-                            if let Err(e) = result_sender.send(WriterMsg::TaskRow(task_row.clone())).await {
+                            if let Err(e) = result_sender.send(WriterMsg::Payload(task_row.clone())).await {
                                 error!("Could not output successful record {:?} : {}, quitting", task_row, e);
                                 return;
                             }
@@ -283,7 +278,7 @@ where
                                     if let Err(e) = task_sender.send(task_row.clone()).await {
                                         error!("Could not send {:?} for retry ( {} )", task_row, e);
                                         task_row.error = Some(format!("Shutdown before retrying ( last error: {} )", task_row.error.unwrap()));
-                                        if let Err(e) = result_sender.send(WriterMsg::TaskRow(task_row.clone())).await {
+                                        if let Err(e) = result_sender.send(WriterMsg::Payload(task_row.clone())).await {
                                             error!("Could not output failed record {:?} : dropping it ( {} )", task_row, e);
                                         }
                                     }
@@ -294,7 +289,7 @@ where
                         }
                     };
 
-                    if let Err(e) = result_sender.send(WriterMsg::TaskRow(error_task_row.clone())).await {
+                    if let Err(e) = result_sender.send(WriterMsg::Payload(error_task_row.clone())).await {
                         error!("Could not output failed record {:?} : {}, quitting", error_task_row, e);
                         return;
                     }
@@ -308,9 +303,9 @@ where
     }
 
     pub fn start(
-        input_stream_factory: TaskRowStreamFactory,
+        input_stream_factory: TaskPayloadStreamFactory,
         record_writer: FutureRecordWriterType,
-        process_row_factory: ProcessRowFactory,
+        process_row_factory: ProcessorFactory,
         workers_count: usize,
         retries: usize,
     ) -> Result<(), String> {

@@ -1,13 +1,67 @@
 use clap::{App, Arg};
 use log::LevelFilter;
 
+use async_std::sync::Mutex;
 use async_tasklist_executor::csv::{csv_stream, CsvWriter, InputData};
 use async_tasklist_executor::example_process_entry::process_entry;
-use async_tasklist_executor::tasklist_executor::{TaskListExecutor, TaskPayload};
+use async_tasklist_executor::tasklist_executor::{
+    TaskListExecutor, TaskPayload, TaskProcessor, TaskProcessorFactory, TaskResult,
+};
+use futures::future::BoxFuture;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 struct ProcessState {
     request_count: usize,
     worker_name: String,
+}
+
+struct ProcessorFactory {
+    count: AtomicI32,
+}
+
+impl TaskProcessorFactory<InputData> for ProcessorFactory {
+    fn new_task_processor(&self) -> BoxFuture<Pin<Box<dyn TaskProcessor<InputData>>>> {
+        let n = self.count.load(Ordering::Acquire) + 1;
+        self.count.store(n, Ordering::Release);
+        let id = format!("Worker {}", n);
+
+        Box::pin(async {
+            // enforce type, compiler doesn't seem to guess otherwise
+            Box::pin(Processor::new(id)) as Pin<Box<dyn TaskProcessor<InputData>>>
+        })
+    }
+}
+
+struct Processor {
+    state: Mutex<ProcessState>,
+}
+
+impl Processor {
+    fn new(id: String) -> Self {
+        Self {
+            state: Mutex::new(ProcessState {
+                request_count: 0,
+                worker_name: id,
+            }),
+        }
+    }
+}
+
+impl TaskProcessor<InputData> for Processor {
+    fn process_task(
+        &self,
+        task_payload: TaskPayload<InputData>,
+    ) -> BoxFuture<'_, TaskResult<InputData>> {
+        Box::pin(async move {
+            let worker_id = {
+                let mut state = self.state.lock().await;
+                state.request_count += 1;
+                format!("{} Request {}", state.worker_name, state.request_count)
+            };
+            process_entry(worker_id, task_payload).await
+        })
+    }
 }
 
 fn main() -> Result<(), String> {
@@ -57,21 +111,8 @@ fn main() -> Result<(), String> {
         .parse()
         .expect("Numerical value expected");
 
-    // this way we can initialize a 'task processor' that can setup some state that can then
-    // be read/change at every iteration
-    let row_processor_factory = |worker_id: String| async move {
-        // demonstrates a modifiable state between calls
-        let mut state = ProcessState {
-            request_count: 0,
-            worker_name: worker_id,
-        };
-        move |parameter: TaskPayload<InputData>| {
-            state.request_count += 1;
-            process_entry(
-                format!("{} Request {}", state.worker_name, state.request_count),
-                parameter,
-            )
-        }
+    let row_processor_factory = ProcessorFactory {
+        count: Default::default(),
     };
 
     let input_filename = arg_matches.value_of("input").unwrap().to_string();

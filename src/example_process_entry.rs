@@ -3,14 +3,12 @@ use core::time::Duration;
 
 use log::{error, info};
 
-use crate::tasklist_executor::{TaskError, TaskResult, TaskPayload, TaskData};
-
+use crate::tasklist_executor::{TaskData, TaskError, TaskPayload, TaskResult};
 
 pub async fn process_entry<Data: TaskData>(
     worker_id: String,
     task_row: TaskPayload<Data>,
-) -> TaskResult<Data>
-{
+) -> TaskResult<Data> {
     let client = reqwest::blocking::ClientBuilder::new()
         .connect_timeout(Duration::from_millis(4000))
         .timeout(Duration::from_millis(5000))
