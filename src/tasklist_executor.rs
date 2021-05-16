@@ -310,8 +310,16 @@ where
         let (result_sender, result_receiver) = bounded(workers_count);
         {
             let task_sender = task_sender.clone();
+            let result_sender = result_sender.clone();
+            let mut counter = 0;
+
             ctrlc::set_handler(move || {
-                task_sender.close();
+                counter += 1;
+                if counter == 1 {
+                    task_sender.close();
+                } else {
+                    result_sender.close();
+                }
             })
         }
         .expect("Error setting Ctrl-C handler");
