@@ -4,7 +4,9 @@ use log::LevelFilter;
 use async_std::sync::Mutex;
 use async_tasklist_executor::csv::{csv_stream, CsvWriter, InputData};
 use async_tasklist_executor::example_process_entry::process_entry;
-use async_tasklist_executor::tasklist_executor::{TaskListExecutor, TaskPayload, TaskProcessor, TaskProcessorFactory, TaskResult};
+use async_tasklist_executor::tasklist_executor::{
+    TaskListExecutor, TaskPayload, TaskProcessor, TaskProcessorFactory, TaskResult,
+};
 use futures::future::BoxFuture;
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -16,7 +18,6 @@ struct ProcessState {
 struct ProcessorFactory {
     count: AtomicI32,
 }
-
 
 impl TaskProcessorFactory for ProcessorFactory {
     type Data = InputData;
@@ -52,7 +53,10 @@ impl Processor {
 impl TaskProcessor for Processor {
     type Data = InputData;
 
-    fn process_task(&self, task_payload: TaskPayload<Self::Data>) -> BoxFuture<'_, TaskResult<Self::Data>> {
+    fn process_task(
+        &self,
+        task_payload: TaskPayload<Self::Data>,
+    ) -> BoxFuture<'_, TaskResult<Self::Data>> {
         Box::pin(async move {
             let worker_id = {
                 let mut state = self.state.lock().await;

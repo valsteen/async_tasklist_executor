@@ -114,7 +114,9 @@ impl CsvWriter {
 impl RecordWriter for CsvWriter {
     type DataType = InputData;
 
-    fn write_record(&self, task_row: TaskPayload<Self::DataType>,
+    fn write_record(
+        &self,
+        task_row: TaskPayload<Self::DataType>,
     ) -> BoxFuture<'static, Result<(), String>> {
         let record = match task_row.success_ts {
             None => StringRecord::from(vec![

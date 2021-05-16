@@ -49,14 +49,17 @@ pub trait TaskData: Clone + Debug + Send + Sync + Display + 'static {}
 
 pub trait TaskProcessorFactory: Send + Sync + 'static {
     type Data: TaskData;
-    type Processor: TaskProcessor<Data=Self::Data>;
+    type Processor: TaskProcessor<Data = Self::Data>;
 
     fn new_task_processor(&self) -> BoxFuture<Self::Processor>;
 }
 
 pub trait TaskProcessor: Send + Sync {
     type Data: TaskData;
-    fn process_task(&self, task_payload: TaskPayload<Self::Data>) -> BoxFuture<TaskResult<Self::Data>>;
+    fn process_task(
+        &self,
+        task_payload: TaskPayload<Self::Data>,
+    ) -> BoxFuture<TaskResult<Self::Data>>;
 }
 
 async fn write_loop<Data: TaskData, Writer, WriterResult>(
@@ -113,7 +116,10 @@ enum WriterMsg<Data: TaskData> {
 
 pub trait RecordWriter {
     type DataType: TaskData;
-    fn write_record(&self, task_payload: TaskPayload<Self::DataType>) -> BoxFuture<'static, Result<(), String>>;
+    fn write_record(
+        &self,
+        task_payload: TaskPayload<Self::DataType>,
+    ) -> BoxFuture<'static, Result<(), String>>;
 }
 
 pub struct TaskListExecutor<
@@ -138,7 +144,6 @@ pub struct TaskListExecutor<
     )>,
 }
 
-
 impl<
         Data,
         ProcessorFactory,
@@ -157,7 +162,7 @@ impl<
     >
 where
     Data: TaskData,
-    ProcessorFactory: TaskProcessorFactory<Data=Data>,
+    ProcessorFactory: TaskProcessorFactory<Data = Data>,
     TaskPayloadStream: Stream<Item = TaskPayload<Data>> + Unpin + Send + 'static,
     TaskPayloadStreamFactory:
         Future<Output = Result<TaskPayloadStream, String>> + Unpin + Send + 'static,
