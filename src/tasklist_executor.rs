@@ -12,9 +12,7 @@ use futures::StreamExt;
 use log::{error, info};
 
 #[derive(Clone, Debug)]
-pub struct TaskRow<Data>
-where
-    Data: Clone,
+pub struct TaskPayload<Data: TaskData>
 {
     pub line: usize,
     pub data: Data,
@@ -42,18 +40,27 @@ impl Display for TaskError {
 }
 
 #[derive(Clone)]
-pub enum TaskResult<Data: Clone> {
-    Success(TaskRow<Data>),
-    Error(TaskRow<Data>, TaskError),
-    Retry(TaskRow<Data>, String),
+pub enum TaskResult<Data: TaskData> {
+    Success(TaskPayload<Data>),
+    Error(TaskPayload<Data>, TaskError),
+    Retry(TaskPayload<Data>, String),
 }
 
-async fn write_loop<Data, Writer, WriterResult>(
+pub trait TaskData: Clone + Debug + Send + Sync + Display + 'static {}
+
+pub trait TaskProcessor {
+    type ProcessTaskResult;
+    type FutureProcessTaskResult: Future<Output=Self::ProcessTaskResult>;
+    type Data: TaskData;
+
+    fn process_task(&mut self, task_payload: TaskPayload<Self::Data>) -> Self::FutureProcessTaskResult;
+}
+
+async fn write_loop<Data: TaskData, Writer, WriterResult>(
     mut write_record: Writer,
     result_receiver: Receiver<WriterMsg<Data>>,
 ) where
-    Data: Display + Debug + Clone,
-    Writer: FnMut(TaskRow<Data>) -> WriterResult,
+    Writer: FnMut(TaskPayload<Data>) -> WriterResult,
     WriterResult: Future<Output = Result<(), String>> + Unpin,
 {
     let mut read_count = None;
@@ -93,8 +100,8 @@ async fn write_loop<Data, Writer, WriterResult>(
     }
 }
 
-enum WriterMsg<Data: Clone> {
-    TaskRow(TaskRow<Data>),
+enum WriterMsg<Data: TaskData> {
+    TaskRow(TaskPayload<Data>),
     Eof(usize),
 }
 
@@ -127,15 +134,15 @@ pub struct TaskListExecutor<
 }
 
 pub trait RecordWriter {
-    type DataType: Clone;
+    type DataType: TaskData;
     fn write_record(
         self: &Arc<Self>,
-        task_row: TaskRow<Self::DataType>,
+        task_row: TaskPayload<Self::DataType>,
     ) -> BoxFuture<'static, Result<(), String>>;
 }
 
 impl<
-        Data: Clone + Debug + Send + Sync + Display + 'static,
+        Data: TaskData,
         ProcessRow,
         ProcessRowFactoryResult,
         ProcessRowFactory,
@@ -157,19 +164,18 @@ impl<
         RecordWriterType,
     >
 where
-    Data: Clone + Debug + Send + Sync + Display + 'static,
-    ProcessRow: FnMut(TaskRow<Data>) -> ProcessRowResult + Send + 'static,
+    ProcessRow: FnMut(TaskPayload<Data>) -> ProcessRowResult + Send + 'static,
     ProcessRowResult: Future<Output = TaskResult<Data>> + Send + 'static,
     ProcessRowFactory: Fn(String) -> ProcessRowFactoryResult + Clone + Send + Sync + 'static,
     ProcessRowFactoryResult: Future<Output = ProcessRow> + Send + 'static,
-    TaskRowStream: Stream<Item = TaskRow<Data>> + Unpin + Send + 'static,
+    TaskRowStream: Stream<Item = TaskPayload<Data>> + Unpin + Send + 'static,
     TaskRowStreamFactory: Future<Output = Result<TaskRowStream, String>> + Unpin + Send + 'static,
     RecordWriterType: RecordWriter<DataType = Data> + 'static,
     FutureRecordWriterType: Future<Output = Result<RecordWriterType, String>> + 'static,
 {
     async fn read_loop(
         reader_factory: TaskRowStreamFactory,
-        task_sender: Sender<TaskRow<Data>>,
+        task_sender: Sender<TaskPayload<Data>>,
         result_sender: Sender<WriterMsg<Data>>,
     ) {
         let mut tasks_count: usize = 0;
@@ -210,8 +216,8 @@ where
 
     async fn prepare_workers(
         workers_count: usize,
-        task_receiver: Receiver<TaskRow<Data>>,
-        task_sender: Sender<TaskRow<Data>>,
+        task_receiver: Receiver<TaskPayload<Data>>,
+        task_sender: Sender<TaskPayload<Data>>,
         result_sender: Sender<WriterMsg<Data>>,
         process_entry_factory: ProcessRowFactory,
         retries: usize,

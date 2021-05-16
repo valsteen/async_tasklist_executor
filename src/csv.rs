@@ -1,4 +1,4 @@
-use crate::tasklist_executor::{RecordWriter, TaskRow};
+use crate::tasklist_executor::{RecordWriter, TaskPayload, TaskData};
 use async_std::fs::{File, OpenOptions};
 use async_std::stream::Stream;
 use async_std::sync::{Arc, Mutex};
@@ -8,11 +8,13 @@ use csv_async::StringRecord;
 use futures::future::BoxFuture;
 use futures::StreamExt;
 use log::{error, info};
+use std::fmt::{Display, Formatter, Debug};
+
 
 fn make_task_row(
     record: Result<StringRecord, csv_async::Error>,
     line_number: usize,
-) -> Result<TaskRow<String>, String> {
+) -> Result<TaskPayload<InputData>, String> {
     let record = match record {
         Ok(record) => record,
         Err(err) => {
@@ -40,16 +42,28 @@ fn make_task_row(
         }
     };
 
-    Ok(TaskRow {
+    Ok(TaskPayload {
         line: line_number,
-        data: url,
+        data: InputData(url),
         success_ts,
         error: None,
         attempt: 0,
     })
 }
 
-pub fn csv_stream(filename: String) -> Result<impl Stream<Item = TaskRow<String>>, String> {
+#[derive(Debug, Clone)]
+pub struct InputData(String);
+
+impl Display for InputData {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f )
+    }
+}
+
+impl TaskData for InputData {}
+
+
+pub fn csv_stream(filename: String) -> Result<impl Stream<Item = TaskPayload<InputData>>, String> {
     let csv_reader = {
         let input_file = task::block_on(File::open(filename.clone()))
             .map_err(|e| format!("Cannot open file {} for reading: {}", filename, e))?;
@@ -100,20 +114,20 @@ impl CsvWriter {
 }
 
 impl RecordWriter for CsvWriter {
-    type DataType = String;
+    type DataType = InputData;
 
     fn write_record(
         self: &Arc<Self>,
-        task_row: TaskRow<Self::DataType>,
+        task_row: TaskPayload<Self::DataType>,
     ) -> BoxFuture<'static, Result<(), String>> {
         let self_ = self.clone();
         let record = match task_row.success_ts {
             None => StringRecord::from(vec![
-                task_row.data.to_string(),
+                task_row.data.0,
                 "".to_string(),
                 task_row.error.unwrap_or_default(),
             ]),
-            Some(ts) => StringRecord::from(vec![task_row.data.to_string(), ts]),
+            Some(ts) => StringRecord::from(vec![task_row.data.0, ts]),
         };
 
         Box::pin(async move {

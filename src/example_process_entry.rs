@@ -3,16 +3,13 @@ use core::time::Duration;
 
 use log::{error, info};
 
-use crate::tasklist_executor::{TaskError, TaskResult, TaskRow};
-use reqwest::IntoUrl;
-use std::fmt::Display;
+use crate::tasklist_executor::{TaskError, TaskResult, TaskPayload, TaskData};
 
-pub async fn process_entry<Data: Display>(
+
+pub async fn process_entry<Data: TaskData>(
     worker_id: String,
-    task_row: TaskRow<Data>,
+    task_row: TaskPayload<Data>,
 ) -> TaskResult<Data>
-where
-    Data: Clone + IntoUrl,
 {
     let client = reqwest::blocking::ClientBuilder::new()
         .connect_timeout(Duration::from_millis(4000))
@@ -20,7 +17,7 @@ where
         .build()
         .expect("Cannot build http client");
 
-    let request = match client.get(task_row.data.clone()).build() {
+    let request = match client.get(task_row.data.to_string()).build() {
         Ok(request) => request,
         Err(e) => {
             error!(

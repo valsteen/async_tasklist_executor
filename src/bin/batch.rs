@@ -1,9 +1,9 @@
 use clap::{App, Arg};
 use log::LevelFilter;
 
-use async_tasklist_executor::csv::{csv_stream, CsvWriter};
+use async_tasklist_executor::csv::{csv_stream, CsvWriter, InputData};
 use async_tasklist_executor::example_process_entry::process_entry;
-use async_tasklist_executor::tasklist_executor::{TaskListExecutor, TaskRow};
+use async_tasklist_executor::tasklist_executor::{TaskListExecutor, TaskPayload};
 
 struct ProcessState {
     request_count: usize,
@@ -65,7 +65,7 @@ fn main() -> Result<(), String> {
             request_count: 0,
             worker_name: worker_id,
         };
-        move |parameter: TaskRow<String>| {
+        move |parameter: TaskPayload<InputData>| {
             state.request_count += 1;
             process_entry(
                 format!("{} Request {}", state.worker_name, state.request_count),
@@ -76,6 +76,7 @@ fn main() -> Result<(), String> {
 
     let input_filename = arg_matches.value_of("input").unwrap().to_string();
     let input_factory = Box::pin(async move { csv_stream(input_filename) });
+
     TaskListExecutor::start(
         input_factory,
         CsvWriter::new(arg_matches.value_of("output").unwrap().to_string()),
