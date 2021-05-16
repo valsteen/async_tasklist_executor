@@ -4,9 +4,8 @@ use log::LevelFilter;
 use async_std::sync::Mutex;
 use async_tasklist_executor::csv::{csv_stream, CsvWriter, InputData};
 use async_tasklist_executor::example_process_entry::process_entry;
-use async_tasklist_executor::tasklist_executor::{TaskListExecutor, TaskPayload, TaskProcessor, TaskProcessorFactory, TaskResult, TaskData};
+use async_tasklist_executor::tasklist_executor::{TaskListExecutor, TaskPayload, TaskProcessor, TaskProcessorFactory, TaskResult};
 use futures::future::BoxFuture;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 struct ProcessState {

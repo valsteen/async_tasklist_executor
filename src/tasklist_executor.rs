@@ -10,7 +10,6 @@ use chrono::Local;
 use futures::future::{join_all, BoxFuture};
 use futures::StreamExt;
 use log::{error, info};
-use std::pin::Pin;
 
 #[derive(Clone, Debug)]
 pub struct TaskPayload<Data: TaskData> {
