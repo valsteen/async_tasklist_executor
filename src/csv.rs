@@ -85,7 +85,7 @@ pub fn csv_stream(filename: String) -> Result<impl Stream<Item = TaskPayload<Inp
 }
 
 pub struct CsvWriter {
-    csv_writer: Mutex<AsyncWriter<File>>,
+    csv_writer: Arc<Mutex<AsyncWriter<File>>>,
 }
 
 impl CsvWriter {
@@ -106,7 +106,7 @@ impl CsvWriter {
         };
 
         Ok(Self {
-            csv_writer: Mutex::new(csv_writer),
+            csv_writer: Arc::new(Mutex::new(csv_writer)),
         })
     }
 }
@@ -114,11 +114,8 @@ impl CsvWriter {
 impl RecordWriter for CsvWriter {
     type DataType = InputData;
 
-    fn write_record(
-        self: &Arc<Self>,
-        task_row: TaskPayload<Self::DataType>,
+    fn write_record(&self, task_row: TaskPayload<Self::DataType>,
     ) -> BoxFuture<'static, Result<(), String>> {
-        let self_ = self.clone();
         let record = match task_row.success_ts {
             None => StringRecord::from(vec![
                 task_row.data.0,
@@ -128,8 +125,10 @@ impl RecordWriter for CsvWriter {
             Some(ts) => StringRecord::from(vec![task_row.data.0, ts]),
         };
 
+        let csv_writer = self.csv_writer.clone();
+
         Box::pin(async move {
-            let mut csv_writer = self_.csv_writer.lock().await;
+            let mut csv_writer = csv_writer.lock().await;
             if let Err(e) = csv_writer.write_record(&record).await {
                 error!("Error while writing back {:?} ({}), quitting", record, e);
                 Err(e.to_string())

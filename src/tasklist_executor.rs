@@ -110,10 +110,7 @@ enum WriterMsg<Data: TaskData> {
 
 pub trait RecordWriter {
     type DataType: TaskData;
-    fn write_record(
-        self: &Arc<Self>,
-        task_payload: TaskPayload<Self::DataType>,
-    ) -> BoxFuture<'static, Result<(), String>>;
+    fn write_record(&self, task_payload: TaskPayload<Self::DataType>) -> BoxFuture<'static, Result<(), String>>;
 }
 
 pub struct TaskListExecutor<
