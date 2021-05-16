@@ -4,9 +4,7 @@ use log::LevelFilter;
 use async_std::sync::Mutex;
 use async_tasklist_executor::csv::{csv_stream, CsvWriter, InputData};
 use async_tasklist_executor::example_process_entry::process_entry;
-use async_tasklist_executor::tasklist_executor::{
-    TaskListExecutor, TaskPayload, TaskProcessor, TaskProcessorFactory, TaskResult,
-};
+use async_tasklist_executor::tasklist_executor::{TaskListExecutor, TaskPayload, TaskProcessor, TaskProcessorFactory, TaskResult, TaskData};
 use futures::future::BoxFuture;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -20,15 +18,19 @@ struct ProcessorFactory {
     count: AtomicI32,
 }
 
-impl TaskProcessorFactory<InputData> for ProcessorFactory {
-    fn new_task_processor(&self) -> BoxFuture<Pin<Box<dyn TaskProcessor<InputData>>>> {
+
+impl TaskProcessorFactory for ProcessorFactory {
+    type Data = InputData;
+    type Processor = Processor;
+
+    fn new_task_processor(&self) -> BoxFuture<Processor> {
         let n = self.count.load(Ordering::Acquire) + 1;
         self.count.store(n, Ordering::Release);
         let id = format!("Worker {}", n);
 
         Box::pin(async {
             // enforce type, compiler doesn't seem to guess otherwise
-            Box::pin(Processor::new(id)) as Pin<Box<dyn TaskProcessor<InputData>>>
+            Processor::new(id)
         })
     }
 }
@@ -48,11 +50,10 @@ impl Processor {
     }
 }
 
-impl TaskProcessor<InputData> for Processor {
-    fn process_task(
-        &self,
-        task_payload: TaskPayload<InputData>,
-    ) -> BoxFuture<'_, TaskResult<InputData>> {
+impl TaskProcessor for Processor {
+    type Data = InputData;
+
+    fn process_task(&self, task_payload: TaskPayload<Self::Data>) -> BoxFuture<'_, TaskResult<Self::Data>> {
         Box::pin(async move {
             let worker_id = {
                 let mut state = self.state.lock().await;
