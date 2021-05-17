@@ -1,8 +1,6 @@
-use crate::tasklist_executor::{RecordWriter, TaskData, TaskPayload};
+use crate::tasklist_executor::{RecordWriter, TaskData, TaskPayload, PinnedTaskPayloadStream};
 use async_std::fs::File;
-use async_std::stream::Stream;
 use async_std::sync::{Arc, Mutex};
-use async_std::task;
 use csv_async::AsyncWriter;
 use csv_async::StringRecord;
 use futures::future::BoxFuture;
@@ -10,6 +8,7 @@ use futures::StreamExt;
 use log::{error, info};
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::OpenOptions;
+
 
 fn make_task_row(
     record: Result<StringRecord, csv_async::Error>,
@@ -62,9 +61,9 @@ impl Display for InputData {
 
 impl TaskData for InputData {}
 
-pub fn csv_stream(filename: String) -> Result<impl Stream<Item = TaskPayload<InputData>>, String> {
+pub async fn csv_stream(filename: String) -> Result<PinnedTaskPayloadStream<InputData>, String> {
     let csv_reader = {
-        let input_file = task::block_on(File::open(filename.clone()))
+        let input_file = File::open(filename.clone()).await
             .map_err(|e| format!("Cannot open file {} for reading: {}", filename, e))?;
         csv_async::AsyncReaderBuilder::new()
             .has_headers(false)
@@ -74,7 +73,7 @@ pub fn csv_stream(filename: String) -> Result<impl Stream<Item = TaskPayload<Inp
     };
 
     let mut line_number = 0;
-    Ok(csv_reader.into_records().filter_map(move |record| {
+    Ok(Box::pin(csv_reader.into_records().filter_map(move |record| {
         Box::pin(async move {
             line_number += 1;
             match make_task_row(record, line_number) {
@@ -82,7 +81,7 @@ pub fn csv_stream(filename: String) -> Result<impl Stream<Item = TaskPayload<Inp
                 Err(_) => None,
             }
         })
-    }))
+    })))
 }
 
 pub struct CsvWriter {

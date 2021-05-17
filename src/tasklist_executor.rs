@@ -10,6 +10,7 @@ use chrono::Local;
 use futures::future::{join_all, BoxFuture};
 use futures::StreamExt;
 use log::{error, info};
+use std::pin::Pin;
 
 #[derive(Clone, Debug)]
 pub struct TaskPayload<Data: TaskData> {
@@ -60,6 +61,14 @@ pub trait TaskProcessor: Send + Sync {
         &self,
         task_payload: TaskPayload<Self::Data>,
     ) -> BoxFuture<TaskResult<Self::Data>>;
+}
+
+pub type PinnedTaskPayloadStream<Data> = Pin<Box<dyn Stream<Item = TaskPayload<Data>> + Send>>;
+
+pub trait TaskPayloadStreamFactoryType : Send + 'static
+{
+    type Data: TaskData;
+    fn get_stream(self) -> BoxFuture<'static, Result<PinnedTaskPayloadStream<Self::Data> , String>>;
 }
 
 async fn write_loop<Data: TaskData, Writer, WriterResult>(
@@ -124,9 +133,8 @@ pub trait RecordWriter {
 
 pub struct TaskListExecutor<
     Data,
-    ProcessorFactory,
-    TaskPayloadStream,
     TaskPayloadStreamFactory,
+    ProcessorFactory,
     RecordWriterType,
 > {
     // Type parameters are declared at struct level in order to state the constraints only once.
@@ -135,9 +143,8 @@ pub struct TaskListExecutor<
     #[allow(clippy::type_complexity)]
     phantom_data: PhantomData<(
         Data,
-        ProcessorFactory,
-        TaskPayloadStream,
         TaskPayloadStreamFactory,
+        ProcessorFactory,
         RecordWriterType,
     )>,
 }
@@ -145,23 +152,19 @@ pub struct TaskListExecutor<
 impl<
         Data,
         ProcessorFactory,
-        TaskPayloadStream,
         TaskPayloadStreamFactory,
         RecordWriterType,
     >
     TaskListExecutor<
         Data,
         ProcessorFactory,
-        TaskPayloadStream,
         TaskPayloadStreamFactory,
         RecordWriterType,
     >
 where
     Data: TaskData,
-    ProcessorFactory: TaskProcessorFactory<Data = Data>,
-    TaskPayloadStream: Stream<Item = TaskPayload<Data>> + Unpin + Send + 'static,
-    TaskPayloadStreamFactory:
-        Future<Output = Result<TaskPayloadStream, String>> + Unpin + Send + 'static,
+    ProcessorFactory: TaskProcessorFactory<Data=Data>,
+    TaskPayloadStreamFactory: TaskPayloadStreamFactoryType<Data=Data>,
     RecordWriterType: RecordWriter<DataType = Data> + 'static
 {
     async fn read_loop(
@@ -171,7 +174,7 @@ where
     ) {
         let mut tasks_count: usize = 0;
 
-        let mut reader = match reader_factory.await {
+        let mut reader = match reader_factory.get_stream().await {
             Ok(reader) => reader,
             Err(err) => {
                 error!("{}, leaving reader", err);
