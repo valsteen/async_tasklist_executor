@@ -9,7 +9,7 @@ pub async fn process_entry<Data: TaskData>(
     worker_id: String,
     task_row: TaskPayload<Data>,
 ) -> TaskResult<Data> {
-    let client = reqwest::blocking::ClientBuilder::new()
+    let client = reqwest::ClientBuilder::new()
         .connect_timeout(Duration::from_millis(4000))
         .timeout(Duration::from_millis(5000))
         .build()
@@ -26,7 +26,7 @@ pub async fn process_entry<Data: TaskData>(
         }
     };
 
-    match client.execute(request) {
+    match client.execute(request).await {
         Ok(response) => {
             if let Err(e) = response.error_for_status() {
                 error!(

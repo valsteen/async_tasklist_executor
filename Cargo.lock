@@ -59,6 +59,7 @@ dependencies = [
  "futures-lite",
  "num_cpus",
  "once_cell",
+ "tokio",
 ]
 
 [[package]]
@@ -1098,7 +1099,6 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde",
- "serde_json",
  "serde_urlencoded",
  "tokio",
  "tokio-native-tls",
