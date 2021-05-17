@@ -122,9 +122,11 @@ fn main() -> Result<(), String> {
     let input_filename = arg_matches.value_of("input").unwrap().to_string();
     let input_factory = Box::pin(async move { csv_stream(input_filename) });
 
+    let csv_writer = CsvWriter::new(arg_matches.value_of("output").unwrap().to_string())?;
+
     TaskListExecutor::start(
         input_factory,
-        CsvWriter::new(arg_matches.value_of("output").unwrap().to_string()),
+        csv_writer,
         row_processor_factory,
         workers,
         retries,

@@ -127,7 +127,6 @@ pub struct TaskListExecutor<
     ProcessorFactory,
     TaskPayloadStream,
     TaskPayloadStreamFactory,
-    FutureRecordWriterType,
     RecordWriterType,
 > {
     // Type parameters are declared at struct level in order to state the constraints only once.
@@ -139,7 +138,6 @@ pub struct TaskListExecutor<
         ProcessorFactory,
         TaskPayloadStream,
         TaskPayloadStreamFactory,
-        FutureRecordWriterType,
         RecordWriterType,
     )>,
 }
@@ -149,7 +147,6 @@ impl<
         ProcessorFactory,
         TaskPayloadStream,
         TaskPayloadStreamFactory,
-        FutureRecordWriterType,
         RecordWriterType,
     >
     TaskListExecutor<
@@ -157,7 +154,6 @@ impl<
         ProcessorFactory,
         TaskPayloadStream,
         TaskPayloadStreamFactory,
-        FutureRecordWriterType,
         RecordWriterType,
     >
 where
@@ -166,8 +162,7 @@ where
     TaskPayloadStream: Stream<Item = TaskPayload<Data>> + Unpin + Send + 'static,
     TaskPayloadStreamFactory:
         Future<Output = Result<TaskPayloadStream, String>> + Unpin + Send + 'static,
-    RecordWriterType: RecordWriter<DataType = Data> + 'static,
-    FutureRecordWriterType: Future<Output = Result<RecordWriterType, String>> + 'static,
+    RecordWriterType: RecordWriter<DataType = Data> + 'static
 {
     async fn read_loop(
         reader_factory: TaskPayloadStreamFactory,
@@ -310,7 +305,7 @@ where
 
     pub fn start(
         input_stream_factory: TaskPayloadStreamFactory,
-        record_writer: FutureRecordWriterType,
+        record_writer: RecordWriterType,
         process_row_factory: ProcessorFactory,
         workers_count: usize,
         retries: usize,
@@ -334,12 +329,6 @@ where
         .expect("Error setting Ctrl-C handler");
 
         task::block_on(async {
-            let record_writer = match record_writer.await {
-                Ok(e) => e,
-                Err(e) => {
-                    return Err(e); // compiler won't figure out the type if using "?"
-                }
-            };
             let record_writer = Arc::new(record_writer);
 
             let workers_handle = task::spawn(Self::prepare_workers(
@@ -364,8 +353,7 @@ where
             task_sender.close();
 
             join_all(vec![workers_handle, csv_reader_handle]).await;
-            Ok(())
-        })?;
+        });
 
         Ok(())
     }

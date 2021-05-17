@@ -1,5 +1,5 @@
 use crate::tasklist_executor::{RecordWriter, TaskData, TaskPayload};
-use async_std::fs::{File, OpenOptions};
+use async_std::fs::File;
 use async_std::stream::Stream;
 use async_std::sync::{Arc, Mutex};
 use async_std::task;
@@ -9,6 +9,7 @@ use futures::future::BoxFuture;
 use futures::StreamExt;
 use log::{error, info};
 use std::fmt::{Debug, Display, Formatter};
+use std::fs::OpenOptions;
 
 fn make_task_row(
     record: Result<StringRecord, csv_async::Error>,
@@ -89,14 +90,15 @@ pub struct CsvWriter {
 }
 
 impl CsvWriter {
-    pub async fn new(filename: String) -> Result<Self, String> {
+    pub fn new(filename: String) -> Result<Self, String> {
         let csv_writer = {
             let output_file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(filename.clone())
-                .await
                 .map_err(|e| format!("Cannot open file {} for writing: {}", filename, e))?;
+
+            let output_file = async_std::fs::File::from(output_file);
 
             csv_async::AsyncWriterBuilder::new()
                 .has_headers(false)
@@ -106,7 +108,7 @@ impl CsvWriter {
         };
 
         Ok(Self {
-            csv_writer: Arc::new(Mutex::new(csv_writer)),
+            csv_writer: Arc::new(Mutex::new(csv_writer))
         })
     }
 }
