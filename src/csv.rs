@@ -1,4 +1,4 @@
-use crate::tasklist_executor::{RecordWriter, TaskData, TaskPayload, PinnedTaskPayloadStream};
+use crate::tasklist_executor::{PinnedTaskPayloadStream, RecordWriter, TaskData, TaskPayload};
 use async_std::fs::File;
 use async_std::sync::{Arc, Mutex};
 use csv_async::AsyncWriter;
@@ -8,7 +8,6 @@ use futures::StreamExt;
 use log::{error, info};
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::OpenOptions;
-
 
 fn make_task_row(
     record: Result<StringRecord, csv_async::Error>,
@@ -63,7 +62,8 @@ impl TaskData for InputData {}
 
 pub async fn csv_stream(filename: String) -> Result<PinnedTaskPayloadStream<InputData>, String> {
     let csv_reader = {
-        let input_file = File::open(filename.clone()).await
+        let input_file = File::open(filename.clone())
+            .await
             .map_err(|e| format!("Cannot open file {} for reading: {}", filename, e))?;
         csv_async::AsyncReaderBuilder::new()
             .has_headers(false)
@@ -73,15 +73,17 @@ pub async fn csv_stream(filename: String) -> Result<PinnedTaskPayloadStream<Inpu
     };
 
     let mut line_number = 0;
-    Ok(Box::pin(csv_reader.into_records().filter_map(move |record| {
-        Box::pin(async move {
-            line_number += 1;
-            match make_task_row(record, line_number) {
-                Ok(row) => Some(row),
-                Err(_) => None,
-            }
-        })
-    })))
+    Ok(Box::pin(csv_reader.into_records().filter_map(
+        move |record| {
+            Box::pin(async move {
+                line_number += 1;
+                match make_task_row(record, line_number) {
+                    Ok(row) => Some(row),
+                    Err(_) => None,
+                }
+            })
+        },
+    )))
 }
 
 pub struct CsvWriter {
@@ -107,7 +109,7 @@ impl CsvWriter {
         };
 
         Ok(Self {
-            csv_writer: Arc::new(Mutex::new(csv_writer))
+            csv_writer: Arc::new(Mutex::new(csv_writer)),
         })
     }
 }

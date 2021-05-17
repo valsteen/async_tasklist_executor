@@ -65,10 +65,9 @@ pub trait TaskProcessor: Send + Sync {
 
 pub type PinnedTaskPayloadStream<Data> = Pin<Box<dyn Stream<Item = TaskPayload<Data>> + Send>>;
 
-pub trait TaskPayloadStreamFactoryType : Send + 'static
-{
+pub trait TaskPayloadStreamFactoryType: Send + 'static {
     type Data: TaskData;
-    fn get_stream(self) -> BoxFuture<'static, Result<PinnedTaskPayloadStream<Self::Data> , String>>;
+    fn get_stream(self) -> BoxFuture<'static, Result<PinnedTaskPayloadStream<Self::Data>, String>>;
 }
 
 async fn write_loop<Data: TaskData, Writer, WriterResult>(
@@ -131,12 +130,7 @@ pub trait RecordWriter {
     ) -> BoxFuture<'static, Result<(), String>>;
 }
 
-pub struct TaskListExecutor<
-    Data,
-    TaskPayloadStreamFactory,
-    ProcessorFactory,
-    RecordWriterType,
-> {
+pub struct TaskListExecutor<Data, TaskPayloadStreamFactory, ProcessorFactory, RecordWriterType> {
     // Type parameters are declared at struct level in order to state the constraints only once.
     // But rust requires a usage at that point, so this phantom data is a 0-sized field which
     // has dummy references to the declared types.
@@ -149,23 +143,13 @@ pub struct TaskListExecutor<
     )>,
 }
 
-impl<
-        Data,
-        ProcessorFactory,
-        TaskPayloadStreamFactory,
-        RecordWriterType,
-    >
-    TaskListExecutor<
-        Data,
-        ProcessorFactory,
-        TaskPayloadStreamFactory,
-        RecordWriterType,
-    >
+impl<Data, ProcessorFactory, TaskPayloadStreamFactory, RecordWriterType>
+    TaskListExecutor<Data, ProcessorFactory, TaskPayloadStreamFactory, RecordWriterType>
 where
     Data: TaskData,
-    ProcessorFactory: TaskProcessorFactory<Data=Data>,
-    TaskPayloadStreamFactory: TaskPayloadStreamFactoryType<Data=Data>,
-    RecordWriterType: RecordWriter<DataType = Data> + 'static
+    ProcessorFactory: TaskProcessorFactory<Data = Data>,
+    TaskPayloadStreamFactory: TaskPayloadStreamFactoryType<Data = Data>,
+    RecordWriterType: RecordWriter<DataType = Data> + 'static,
 {
     async fn read_loop(
         reader_factory: TaskPayloadStreamFactory,

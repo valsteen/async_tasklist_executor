@@ -4,7 +4,10 @@ use log::LevelFilter;
 use async_std::sync::Mutex;
 use async_tasklist_executor::csv::{csv_stream, CsvWriter, InputData};
 use async_tasklist_executor::example_process_entry::process_entry;
-use async_tasklist_executor::tasklist_executor::{TaskListExecutor, TaskPayload, TaskProcessor, TaskProcessorFactory, TaskResult, PinnedTaskPayloadStream, TaskPayloadStreamFactoryType};
+use async_tasklist_executor::tasklist_executor::{
+    PinnedTaskPayloadStream, TaskListExecutor, TaskPayload, TaskPayloadStreamFactoryType,
+    TaskProcessor, TaskProcessorFactory, TaskResult,
+};
 use futures::future::BoxFuture;
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -26,10 +29,7 @@ impl TaskProcessorFactory for ProcessorFactory {
         self.count.store(n, Ordering::Release);
         let id = format!("Worker {}", n);
 
-        Box::pin(async {
-            // enforce type, compiler doesn't seem to guess otherwise
-            Processor::new(id)
-        })
+        Box::pin(async { Processor::new(id) })
     }
 }
 
@@ -67,7 +67,7 @@ impl TaskProcessor for Processor {
 }
 
 struct CsvInputStreamFactory {
-    filename: String
+    filename: String,
 }
 
 impl TaskPayloadStreamFactoryType for CsvInputStreamFactory {
@@ -77,7 +77,6 @@ impl TaskPayloadStreamFactoryType for CsvInputStreamFactory {
         Box::pin(csv_stream(self.filename))
     }
 }
-
 
 fn main() -> Result<(), String> {
     env_logger::builder()
@@ -131,7 +130,9 @@ fn main() -> Result<(), String> {
     };
 
     let input_filename = arg_matches.value_of("input").unwrap().to_string();
-    let input_factory = CsvInputStreamFactory { filename: input_filename };
+    let input_factory = CsvInputStreamFactory {
+        filename: input_filename,
+    };
 
     let csv_writer = CsvWriter::new(arg_matches.value_of("output").unwrap().to_string())?;
 
